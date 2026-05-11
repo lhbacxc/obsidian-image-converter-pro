@@ -4,6 +4,8 @@ import ImageConverterPlugin from '../../../src/main';
 import { fakeApp, fakeTFile, fakeVault, fakePluginManifest } from '../../factories/obsidian';
 import { Menu, Platform } from 'obsidian';
 
+vi.mock('child_process');
+
 // Mock modules that are constructed by ContextMenu actions
 vi.mock('../../../src/ProcessSingleImageModal.ts', () => ({
   ProcessSingleImageModal: vi.fn().mockImplementation(() => ({ open: vi.fn() } as any))
@@ -44,6 +46,25 @@ function setupLivePreviewImage() {
   wrap.appendChild(embed);
   document.body.appendChild(wrap);
   return { wrap, embed, imageWrapper, img, corner };
+}
+
+function setupAttachmentEmbed() {
+  document.body.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'markdown-preview-view';
+  const embed = document.createElement('div');
+  embed.className = 'internal-embed';
+  embed.setAttribute('src', 'docs/file.pdf');
+  const fileEmbed = document.createElement('div');
+  fileEmbed.className = 'file-embed';
+  const title = document.createElement('div');
+  title.className = 'file-embed-title';
+  title.textContent = 'file.pdf';
+  fileEmbed.appendChild(title);
+  embed.appendChild(fileEmbed);
+  wrap.appendChild(embed);
+  document.body.appendChild(wrap);
+  return { wrap, embed, fileEmbed, title };
 }
 
 describe('ContextMenu integration (14.1–14.6)', () => {
@@ -87,7 +108,9 @@ beforeEach(async () => {
     it('shows menu on images in markdown views only', () => {
       const showSpy = vi.spyOn((Menu as any).prototype, 'showAtMouseEvent');
       const img = setupImg('markdown-preview-view');
-      (app.workspace.getActiveViewOfType as any) = vi.fn(() => ({ getViewType: () => 'markdown' }));
+      const note = fakeTFile({ path: 'n1.md', name: 'n1.md', extension: 'md' });
+      (app.workspace.getActiveFile as any) = vi.fn(() => note);
+      (app.workspace.getActiveViewOfType as any) = vi.fn(() => ({ getViewType: () => 'markdown', file: note }));
 const ctx = new contextMenuCls(app as any, plugin, { getImagePath: () => null } as any, {} as any);
 
       img.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
@@ -105,7 +128,9 @@ const ctx = new contextMenuCls(app as any, plugin, { getImagePath: () => null } 
     it('suppresses native image focus on right mouse down and clears image embed focus before opening the custom context menu when click override is enabled', () => {
       const showSpy = vi.spyOn((Menu as any).prototype, 'showAtMouseEvent');
       plugin.settings.disableObsidianImageSelectionOnClick = true;
-      (app.workspace.getActiveViewOfType as any) = vi.fn(() => ({ getViewType: () => 'markdown' }));
+      const note = fakeTFile({ path: 'n1.md', name: 'n1.md', extension: 'md' });
+      (app.workspace.getActiveFile as any) = vi.fn(() => note);
+      (app.workspace.getActiveViewOfType as any) = vi.fn(() => ({ getViewType: () => 'markdown', file: note }));
       const { corner, embed } = setupLivePreviewImage();
       const blurSpy = vi.spyOn(embed, 'blur');
 
@@ -150,6 +175,30 @@ const ctx = new contextMenuCls(app as any, plugin, { getImagePath: () => null } 
       document.body.appendChild(div);
       div.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
       expect(showSpy).not.toHaveBeenCalled();
+      (ctx as any).onunload?.();
+    });
+
+    it('shows attachment menu for supported non-image attachment targets', () => {
+      const file = fakeTFile({ path: 'docs/file.pdf', name: 'file.pdf', extension: 'pdf', basename: 'file' });
+      const showSpy = vi.spyOn((Menu as any).prototype, 'showAtMouseEvent').mockImplementation(() => {});
+      const note = fakeTFile({ path: 'n1.md', name: 'n1.md', extension: 'md' });
+      (app.vault.getAbstractFileByPath as any).mockImplementation((path: string) => path === file.path ? file : null);
+      (app.workspace.getActiveFile as any) = vi.fn(() => note);
+      (app.workspace.getActiveViewOfType as any) = vi.fn(() => ({ getViewType: () => 'markdown', file: note }));
+      const { title } = setupAttachmentEmbed();
+
+      const ctx = new contextMenuCls(
+        app as any,
+        plugin,
+        { getImagePath: (el: HTMLElement) => el.getAttribute('src') } as any,
+        {} as any
+      );
+      const attachmentSpy = vi.spyOn(ctx as any, 'createAttachmentContextMenuItems');
+
+      title.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+      expect(attachmentSpy).toHaveBeenCalled();
+      expect(showSpy).toHaveBeenCalled();
       (ctx as any).onunload?.();
     });
   });
@@ -307,6 +356,117 @@ expect(modalSpy).toHaveBeenCalled();
       // We cannot easily assert the specific handler function, but removeEventListener should be called
       expect(removeSpy).toHaveBeenCalled();
     });
+  });
+});
+
+describe('Attachment context menu integration', () => {
+  let app: any;
+  let plugin: any;
+  let contextMenuCls: any;
+
+  beforeEach(async () => {
+    const note = fakeTFile({ path: 'n1.md', name: 'n1.md', extension: 'md' });
+    const attachment = fakeTFile({ path: 'docs/file.pdf', name: 'file.pdf', extension: 'pdf', basename: 'file' });
+    contextMenuCls = (await import('../../../src/ContextMenu')).ContextMenu;
+    const vault = fakeVault({ files: [note, attachment] });
+    app = fakeApp({ vault }) as any;
+    app.showInFolder = vi.fn(async () => {});
+    app.fileManager.trashFile = vi.fn(async () => {});
+
+    const manifest = fakePluginManifest({ id: 'image-converter', name: 'Image Converter' });
+    plugin = new ImageConverterPlugin(app as any, manifest as any);
+    plugin.manifest = manifest as any;
+    plugin.settings = {
+      enableContextMenu: true,
+      isImageAlignmentEnabled: false,
+      disableObsidianImageSelectionOnClick: false
+    } as any;
+    plugin.supportedImageFormats = { isExcalidrawImage: () => false } as any;
+  });
+
+  it('createAttachmentContextMenuItems adds the expected file actions', () => {
+    const ctx = new contextMenuCls(
+      app as any,
+      plugin,
+      { getImagePath: (el: HTMLElement) => el.getAttribute('src') } as any,
+      {} as any
+    );
+
+    const titles: string[] = [];
+    const menu = {
+      addItem(cb: (item: any) => void) {
+        const item = {
+          setTitle(title: string) {
+            titles.push(title);
+            return this;
+          },
+          setIcon() { return this; },
+          onClick() { return this; }
+        };
+        cb(item);
+        return this;
+      },
+      addSeparator() { return this; }
+    } as any;
+
+    const attachmentTarget = {
+      embed: { getAttribute: (name: string) => name === 'src' ? 'docs/file.pdf' : null } as any,
+      target: document.createElement('div')
+    };
+
+    const created = ctx.createAttachmentContextMenuItems(
+      menu,
+      attachmentTarget,
+      fakeTFile({ path: 'n1.md', name: 'n1.md', extension: 'md' }) as any
+    );
+
+    expect(created).toBe(true);
+    expect(titles).toContain('Attachment tools');
+    expect(titles).toContain('Copy file');
+    expect(titles).toContain('Show in navigation');
+    expect(titles).toContain('Show in system explorer');
+    expect(titles).toContain('Delete file and link');
+    (ctx as any).onunload?.();
+  });
+
+  it('renameAttachmentFile preserves the original extension when renaming', async () => {
+    const attachment = fakeTFile({ path: 'docs/file.pdf', name: 'file.pdf', extension: 'pdf', basename: 'file' });
+    const note = fakeTFile({ path: 'n1.md', name: 'n1.md', extension: 'md' });
+    const folderManager = {
+      sanitizeFilename: vi.fn((value: string) => value),
+      safeRenameFile: vi.fn(async () => true)
+    };
+    const variableProcessor = {
+      processTemplate: vi.fn(async (value: string) => value)
+    };
+    const ctx = new contextMenuCls(app as any, plugin, folderManager as any, variableProcessor as any);
+
+    await (ctx as any).renameAttachmentFile({} as any, 'renamed-file', attachment, note);
+
+    expect(app.fileManager.renameFile).toHaveBeenCalledWith(
+      attachment,
+      'docs/renamed-file.pdf'
+    );
+    (ctx as any).onunload?.();
+  });
+
+  it('deleteAttachmentAndLinkFromNote removes note links and trashes the file', async () => {
+    const attachment = fakeTFile({ path: 'docs/file.pdf', name: 'file.pdf', extension: 'pdf', basename: 'file' });
+    const editor = {
+      getDoc: () => ({ lineCount: () => 1 }),
+      getLine: (_line: number) => '![[docs/file.pdf]]',
+      replaceRange: vi.fn()
+    };
+    (app.workspace.getActiveFile as any) = vi.fn(() => fakeTFile({ path: 'n1.md', name: 'n1.md', extension: 'md' }));
+    (app.workspace.getActiveViewOfType as any) = vi.fn(() => ({ editor }));
+
+    const ctx = new contextMenuCls(app as any, plugin, {} as any, {} as any);
+
+    await ctx.deleteAttachmentAndLinkFromNote(attachment);
+
+    expect(editor.replaceRange).toHaveBeenCalled();
+    expect(app.fileManager.trashFile).toHaveBeenCalledWith(attachment);
+    (ctx as any).onunload?.();
   });
 });
 

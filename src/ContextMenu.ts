@@ -12,6 +12,8 @@ import {
 	MarkdownView,
 	Editor,
 } from "obsidian";
+// eslint-disable-next-line import/no-nodejs-modules -- Required for Windows clipboard file copy support in Electron
+import { exec } from "child_process";
 // eslint-disable-next-line import/no-nodejs-modules -- Required for path manipulation; Obsidian runs on Electron with Node.js support
 import * as path from "path";
 import ImageConverterPlugin from "./main";
@@ -27,6 +29,11 @@ interface ImageMatch {
 	lineNumber: number;
 	line: string;
 	fullMatch: string;
+}
+
+interface AttachmentTarget {
+	target: HTMLElement;
+	embed: HTMLElement;
 }
 
 /** Internal Obsidian Menu type with hide method (not in public API) */
@@ -195,6 +202,88 @@ export class ContextMenu extends Component {
 		return img instanceof HTMLImageElement ? img : null;
 	}
 
+	private resolveAttachmentTarget(target: HTMLElement): AttachmentTarget | null {
+		const embed = target.closest(".internal-embed");
+		if (!(embed instanceof HTMLElement)) {
+			return null;
+		}
+
+		const attachmentTarget = target.closest(
+			".file-embed, .file-embed-title, audio, video, iframe"
+		);
+		const fallbackTarget = embed.querySelector(
+			".file-embed, .file-embed-title, audio, video, iframe"
+		);
+		const resolvedTarget =
+			attachmentTarget instanceof HTMLElement
+				? attachmentTarget
+				: fallbackTarget instanceof HTMLElement
+					? fallbackTarget
+					: null;
+
+		return resolvedTarget ? { target: resolvedTarget, embed } : null;
+	}
+
+	private createSrcAttributeProxy(src: string): HTMLImageElement {
+		return {
+			getAttribute: (name: string) => (name === "src" ? src : null),
+		} as unknown as HTMLImageElement;
+	}
+
+	private getAttachmentSource(attachment: AttachmentTarget): string | null {
+		const source =
+			attachment.embed.getAttribute("src") ??
+			attachment.target.getAttribute("src");
+		return source ? source.split("#")[0] : null;
+	}
+
+	private getAttachmentPathSafe(
+		attachment: AttachmentTarget
+	): string | null {
+		const source = this.getAttachmentSource(attachment);
+		if (!source) {
+			return null;
+		}
+
+		const resolvedPath = this.folderAndFilenameManagement.getImagePath(
+			this.createSrcAttributeProxy(source)
+		);
+		if (resolvedPath) {
+			return resolvedPath;
+		}
+
+		const abstractFile = this.app.vault.getAbstractFileByPath(source);
+		return abstractFile instanceof TFile ? abstractFile.path : null;
+	}
+
+	private getAttachmentFile(attachment: AttachmentTarget): TFile | null {
+		const attachmentPath = this.getAttachmentPathSafe(attachment);
+		if (!attachmentPath) {
+			return null;
+		}
+
+		const abstractFile = this.app.vault.getAbstractFileByPath(attachmentPath);
+		return abstractFile instanceof TFile ? abstractFile : null;
+	}
+
+	private async refreshMostRecentLeafView(): Promise<void> {
+		const leaf = this.app.workspace.getMostRecentLeaf();
+		if (!leaf) {
+			return;
+		}
+
+		const currentState = leaf.getViewState();
+		await leaf.setViewState({ type: "empty", state: {} });
+		await leaf.setViewState(currentState);
+	}
+
+	private getAbsoluteVaultFilePath(file: TFile): string | null {
+		const basePath = (
+			this.app.vault.adapter as { getBasePath?: () => string }
+		).getBasePath?.();
+		return basePath ? path.join(basePath, file.path) : null;
+	}
+
 	private getImageTargetForNativeFocusSuppression(
 		event: MouseEvent | PointerEvent
 	): HTMLImageElement | null {
@@ -263,23 +352,26 @@ export class ContextMenu extends Component {
 		}
 
 		const img = this.resolveImageFromTarget(target);
-		if (!img) {
+		const attachment = img ? null : this.resolveAttachmentTarget(target);
+		if (!img && !attachment) {
 			return;
 		}
 
 		// Skip Excalidraw images
-		if (this.plugin.supportedImageFormats.isExcalidrawImage(img)) {
+		if (img && this.plugin.supportedImageFormats.isExcalidrawImage(img)) {
 			return;
 		}
 
-		const isImageInSupportedContainer = !!(
+		const menuTarget = img ?? attachment?.embed ?? attachment?.target;
+
+		const isTargetInSupportedContainer = !!(
 			(
-				img.closest(".markdown-preview-view") ||
-				img.closest(".markdown-source-view")
+				menuTarget?.closest(".markdown-preview-view") ||
+				menuTarget?.closest(".markdown-source-view")
 			)
 			// img.closest('.view-content > div') // uncomment this to enable it inside its individual window
 		);
-		if (!isImageInSupportedContainer) {
+		if (!isTargetInSupportedContainer) {
 			if (target.closest(".map-view-main")) {
 				return;
 			}
@@ -288,21 +380,39 @@ export class ContextMenu extends Component {
 
 		event.preventDefault(); // prevents the default context menu from appearing (if any)
 		event.stopPropagation(); // prevents the event from bubbling up to parent elements (like the callout)
-		this.clearNativeImageFocus(img);
-
-	   const menu = new Menu();
-	   let activeFile = this.app.workspace.getActiveFile();
-	   if (!activeFile) {
-		  // Fallback: try to get file from MarkdownView (file property exists but isn't in public types)
-		  const mv = this.app.workspace.getActiveViewOfType(MarkdownView);
-		  activeFile = this.getFileFromView(mv);
-	   }
-
-		if (activeFile) {
-			this.createContextMenuItems(menu, img, activeFile, event);
+		if (img) {
+			this.clearNativeImageFocus(img);
 		}
 
-		menu.showAtMouseEvent(event);
+		const menu = new Menu();
+		let activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile) {
+			// Fallback: try to get file from MarkdownView (file property exists but isn't in public types)
+			const mv = this.app.workspace.getActiveViewOfType(MarkdownView);
+			activeFile = this.getFileFromView(mv);
+		}
+
+		let hasMenuItems = false;
+		if (activeFile) {
+			if (img) {
+				hasMenuItems = this.createContextMenuItems(
+					menu,
+					img,
+					activeFile,
+					event
+				);
+			} else if (attachment) {
+				hasMenuItems = this.createAttachmentContextMenuItems(
+					menu,
+					attachment,
+					activeFile
+				);
+			}
+		}
+
+		if (hasMenuItems) {
+			menu.showAtMouseEvent(event);
+		}
 	};
 
 	/*-----------------------------------------------------------------*/
@@ -368,6 +478,28 @@ export class ContextMenu extends Component {
 		menu.addSeparator();
 		this.addDeleteImageAndLinkMenuItem(menu, event);
 
+		return true;
+	}
+
+	createAttachmentContextMenuItems(
+		menu: Menu,
+		attachment: AttachmentTarget,
+		activeFile: TFile
+	): boolean {
+		const file = this.getAttachmentFile(attachment);
+		if (!(file instanceof TFile)) {
+			new Notice("Unable to locate attachment file");
+			return false;
+		}
+
+		this.currentMenu = menu;
+		this.addAttachmentRenameInput(menu, file, activeFile);
+		menu.addSeparator();
+		this.addCopyFileMenuItem(menu, file);
+		this.addShowFileInNavigationMenuItem(menu, file);
+		this.addShowFileInSystemExplorerMenuItem(menu, file);
+		menu.addSeparator();
+		this.addDeleteAttachmentAndLinkMenuItem(menu, file);
 		return true;
 	}
 
@@ -1062,6 +1194,197 @@ export class ContextMenu extends Component {
 					(menuItem as MenuItemWithDom & { setTitle?: (title: string) => void }).setTitle?.("Image tools");
 				}
 			});
+		}
+	}
+
+	addAttachmentRenameInput(menu: Menu, file: TFile, activeFile: TFile) {
+		const isNativeMenus = this.isNativeMenusEnabled();
+
+		if (!isNativeMenus && !Platform.isMobile) {
+			menu.addItem((item) => {
+				const menuItem = item as MenuItemWithDom;
+				const inputContainer = document.createElement("div");
+				inputContainer.className =
+					"image-converter-contextmenu-info-container";
+
+				const nameGroup = document.createElement("div");
+				nameGroup.className = "image-converter-contextmenu-input-group";
+
+				const nameIcon = document.createElement("div");
+				nameIcon.className =
+					"image-converter-contextmenu-icon-container";
+				setIcon(nameIcon, "file-text");
+				nameGroup.appendChild(nameIcon);
+
+				const nameLabel = document.createElement("label");
+				nameLabel.textContent = "Name:";
+				nameLabel.setAttribute(
+					"for",
+					"image-converter-attachment-name-input"
+				);
+				nameGroup.appendChild(nameLabel);
+
+				const nameInput = document.createElement("input");
+				nameInput.type = "text";
+				nameInput.value = file.basename;
+				nameInput.placeholder = "Enter a new file name";
+				nameInput.className = "image-converter-contextmenu-name-input";
+				nameInput.id = "image-converter-attachment-name-input";
+				nameGroup.appendChild(nameInput);
+
+				inputContainer.appendChild(nameGroup);
+
+				const confirmButton = document.createElement("div");
+				confirmButton.className =
+					"image-converter-contextmenu-button image-converter-contextmenu-confirm";
+				setIcon(confirmButton, "check");
+				inputContainer.appendChild(confirmButton);
+
+				this.registerDomEvent(
+					nameInput,
+					"mousedown",
+					this.stopPropagationHandler
+				);
+				this.registerDomEvent(
+					nameInput,
+					"click",
+					this.stopPropagationHandler
+				);
+				this.registerDomEvent(
+					nameInput,
+					"keydown",
+					this.stopPropagationHandler
+				);
+				this.registerDomEvent(
+					document,
+					"click",
+					this.documentClickHandler
+				);
+				this.registerDomEvent(confirmButton, "click", async () => {
+					await this.renameAttachmentFile(
+						menu,
+						nameInput.value,
+						file,
+						activeFile
+					);
+				});
+
+				const maybeDom = menuItem.dom as
+					| (HTMLElement & { empty?: () => void })
+					| undefined;
+				if (maybeDom && typeof maybeDom.appendChild === "function") {
+					if (typeof maybeDom.empty === "function") {
+						maybeDom.empty();
+					} else {
+						while (maybeDom.firstChild) {
+							maybeDom.removeChild(maybeDom.firstChild);
+						}
+					}
+					maybeDom.appendChild(inputContainer);
+				} else {
+					(
+						menuItem as MenuItemWithDom & {
+							setTitle?: (title: string) => void;
+						}
+					).setTitle?.("Attachment tools");
+				}
+			});
+			return;
+		}
+
+		menu.addItem((item) =>
+			item
+				.setTitle("Rename file")
+				.setIcon("pencil")
+				.onClick(async () => {
+					const renamedValue = window.prompt(
+						"Enter a new file name",
+						file.basename
+					);
+					if (renamedValue !== null) {
+						await this.renameAttachmentFile(
+							this.currentMenu ?? menu,
+							renamedValue,
+							file,
+							activeFile
+						);
+					}
+				})
+		);
+	}
+
+	private async renameAttachmentFile(
+		menu: Menu,
+		newNameInput: string,
+		file: TFile,
+		activeFile: TFile
+	): Promise<void> {
+		let newName = await this.variableProcessor.processTemplate(
+			newNameInput,
+			{ file, activeFile }
+		);
+		newName = newName.trim();
+
+		if (!newName) {
+			new Notice("Please enter a new file name.");
+			return;
+		}
+
+		newName = this.folderAndFilenameManagement.sanitizeFilename(newName);
+		const extensionSuffix = file.extension ? `.${file.extension}` : "";
+		if (
+			extensionSuffix &&
+			newName.toLowerCase().endsWith(extensionSuffix.toLowerCase())
+		) {
+			newName = newName.slice(0, -extensionSuffix.length);
+		}
+
+		if (/^[.]+$/.test(newName)) {
+			new Notice("Please enter a valid file name");
+			return;
+		}
+
+		const parentPath = file.parent?.path ?? "";
+		const newPath = normalizePath(
+			path.join(parentPath, `${newName}${extensionSuffix}`)
+		);
+		if (newPath === file.path) {
+			this.hideMenu(menu);
+			return;
+		}
+
+		const existingFile = this.app.vault.getAbstractFileByPath(newPath);
+		if (
+			existingFile &&
+			existingFile !== file &&
+			file.path.toLowerCase() !== newPath.toLowerCase()
+		) {
+			new Notice("A file with this name already exists.");
+			return;
+		}
+
+		try {
+			if (file.path.toLowerCase() === newPath.toLowerCase()) {
+				const wasRenamed =
+					await this.folderAndFilenameManagement.safeRenameFile(
+						file,
+						newPath
+					);
+				if (wasRenamed) {
+					new Notice("Attachment name updated successfully");
+				} else {
+					new Notice("Attachment rename failed");
+				}
+			} else {
+				await this.app.fileManager.renameFile(file, newPath);
+				new Notice("Attachment name updated successfully");
+			}
+
+			await this.refreshMostRecentLeafView();
+			this.hideMenu(menu);
+		} catch (error) {
+			console.error("Failed to rename attachment:", error);
+			new Notice("Failed to rename attachment");
 		}
 	}
 
@@ -2164,6 +2487,89 @@ export class ContextMenu extends Component {
 		}
 	}
 
+	addCopyFileMenuItem(menu: Menu, file: TFile) {
+		menu.addItem((item) =>
+			item
+				.setTitle("Copy file")
+				.setIcon("copy")
+				.onClick(async () => {
+					await this.copyFileToSystemClipboard(file);
+				})
+		);
+	}
+
+	async copyFileToSystemClipboard(file: TFile) {
+		const absolutePath = this.getAbsoluteVaultFilePath(file);
+		if (!absolutePath) {
+			new Notice("Unable to resolve attachment path");
+			return;
+		}
+
+		if (process.platform !== "win32") {
+			new Notice("Copy file is currently supported on Windows desktop only.");
+			return;
+		}
+
+		const escapedPath = absolutePath.replace(/'/g, "''");
+		try {
+			await new Promise<void>((resolve, reject) => {
+				exec(
+					`powershell -command "Set-Clipboard -Path '${escapedPath}'"`,
+					(error) => {
+						if (error) {
+							reject(error);
+							return;
+						}
+						resolve();
+					}
+				);
+			});
+			new Notice("File copied to clipboard");
+		} catch (error) {
+			console.error("Failed to copy file:", error);
+			new Notice("Failed to copy file to clipboard");
+		}
+	}
+
+	addShowFileInNavigationMenuItem(menu: Menu, file: TFile) {
+		menu.addItem((item) => {
+			item.setTitle("Show in navigation")
+				.setIcon("folder-open")
+				.onClick(async () => {
+					await this.showFileInNavigation(file);
+				});
+		});
+	}
+
+	async showFileInNavigation(file: TFile) {
+		try {
+			let [fileExplorerLeaf] =
+				this.app.workspace.getLeavesOfType("file-explorer");
+
+			if (!fileExplorerLeaf) {
+				const newLeaf = this.app.workspace.getLeftLeaf(false);
+				if (newLeaf) {
+					await newLeaf.setViewState({
+						type: "file-explorer",
+					});
+					fileExplorerLeaf = newLeaf;
+				}
+			}
+
+			if (fileExplorerLeaf) {
+				if (this.app.workspace.leftSplit) {
+					this.app.workspace.leftSplit.expand();
+				}
+
+				const fileExplorerView = fileExplorerLeaf.view as FileExplorerView;
+				fileExplorerView.revealInFolder?.(file);
+			}
+		} catch (error) {
+			new Notice("Failed to show in navigation");
+			console.error(error);
+		}
+	}
+
 	/*-----------------------------------------------------------------*/
 	/*                  SHOW IN SYSTEM EXPLORER                        */
 	/*-----------------------------------------------------------------*/
@@ -2194,6 +2600,25 @@ export class ContextMenu extends Component {
 				// Use the Obsidian API to reveal the file in the system explorer
 				await this.app.showInFolder(imagePath);
 			}
+		} catch (error) {
+			new Notice("Failed to show in system explorer");
+			console.error(error);
+		}
+	}
+
+	addShowFileInSystemExplorerMenuItem(menu: Menu, file: TFile) {
+		menu.addItem((item) => {
+			item.setTitle("Show in system explorer")
+				.setIcon("arrow-up-right")
+				.onClick(async () => {
+					await this.showFileInSystemExplorer(file);
+				});
+		});
+	}
+
+	async showFileInSystemExplorer(file: TFile) {
+		try {
+			await this.app.showInFolder(file.path);
 		} catch (error) {
 			new Notice("Failed to show in system explorer");
 			console.error(error);
@@ -2374,6 +2799,108 @@ export class ContextMenu extends Component {
 		} catch (error) {
 			console.error("Error deleting image:", error);
 			new Notice("Failed to delete image. Check console for details.");
+		}
+	}
+
+	addDeleteAttachmentAndLinkMenuItem(menu: Menu, file: TFile) {
+		menu.addItem((item) => {
+			item.setTitle("Delete file and link")
+				.setIcon("trash")
+				.onClick(async () => {
+					await this.deleteAttachmentAndLinkFromNote(file);
+				});
+		});
+	}
+
+	async deleteAttachmentAndLinkFromNote(file: TFile) {
+		const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!activeView) {
+			new Notice("No active Markdown view found");
+			return;
+		}
+
+		try {
+			const { editor } = activeView;
+			const matches = await this.findImageMatches(editor, file.path, false);
+
+			if (matches.length === 0) {
+				new Notice("Failed to find file link in the current note.");
+				return;
+			}
+
+			const uniqueMatchesMap: Map<string, ImageMatch> = new Map();
+			for (const match of matches) {
+				const key = `${match.lineNumber}-${match.line}-${match.fullMatch}`;
+				if (!uniqueMatchesMap.has(key)) {
+					uniqueMatchesMap.set(key, match);
+				}
+			}
+			const uniqueMatches = Array.from(uniqueMatchesMap.values());
+
+			if (uniqueMatches.length === 0) {
+				new Notice("Failed to find unique file links in the current note.");
+				return;
+			}
+
+			const handleConfirmation = async () => {
+				const sortedMatches = uniqueMatches.sort(
+					(matchA, matchB) => matchB.lineNumber - matchA.lineNumber
+				);
+
+				for (const match of sortedMatches) {
+					await this.removeImageLinkFromEditor(
+						editor,
+						match.lineNumber,
+						match.line,
+						match.fullMatch,
+						false
+					);
+				}
+
+				new Notice("File link(s) removed from note");
+				await this.app.fileManager.trashFile(file);
+				new Notice("File moved to trash");
+			};
+
+			if (uniqueMatches.length > 1) {
+				const detailsFragment = document.createDocumentFragment();
+				const messageContainer = document.createElement("div");
+				detailsFragment.appendChild(messageContainer);
+
+				const introText = document.createElement("p");
+				introText.textContent = `Found ${uniqueMatches.length} unique matching file links inside current note. Do you want to delete all of them?`;
+				messageContainer.appendChild(introText);
+
+				uniqueMatches.forEach((match, index) => {
+					const lineNumber = match.lineNumber + 1;
+					const lineContent = match.line.trim();
+					const detailDiv = document.createElement("div");
+					detailDiv.addClass("image-converter-confirm-detail");
+					detailDiv.createSpan({
+						text: `  ${index + 1}. Line ${lineNumber}: ${lineContent}`,
+					});
+					messageContainer.appendChild(detailDiv);
+				});
+
+				new ConfirmDialog(
+					this.app,
+					"Confirm Delete",
+					detailsFragment,
+					"Delete",
+					() => {
+						handleConfirmation().catch((error: unknown) => {
+							console.error("Failed to delete file:", error);
+							new Notice("Failed to delete. See console for details.");
+						});
+					}
+				).open();
+				return;
+			}
+
+			await handleConfirmation();
+		} catch (error) {
+			console.error("Error deleting file:", error);
+			new Notice("Failed to delete file. Check console for details.");
 		}
 	}
 
