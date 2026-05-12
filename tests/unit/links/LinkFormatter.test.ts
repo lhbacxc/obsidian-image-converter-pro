@@ -213,12 +213,19 @@ describe('LinkFormatter — corpus coverage', () => {
     expect(out).toBe(`![[./${filename}]]`);
   });
 
-  it.each(paths)('markdown relative uses ./ and encodes only spaces: %s', async (vaultPath) => {
+  it.each(paths)('markdown relative omits ./ and encodes only spaces: %s', async (vaultPath) => {
     const note = fakeTFile({ path: 'Notes/note.md' });
     const { formatter } = makeFormatterWithFiles(paths);
     const out = await formatter.formatLink(vaultPath, 'markdown', 'relative', note, null);
     const filename = vaultPath.split('/').pop()!;
-    expect(out).toBe(`![](${encodeSpacesOnly(`./${filename}`)})`);
+    expect(out).toBe(`![](${encodeSpacesOnly(filename)})`);
+  });
+
+  it('markdown relative path to child folder omits ./ prefix', async () => {
+    const note = fakeTFile({ path: 'Notes/note.md' });
+    const { formatter, files } = makeFormatterWithFiles(['Notes/附件/image with spaces.png']);
+    const out = await formatter.formatLink(files[0].path, 'markdown', 'relative', note, null);
+    expect(out).toBe('![](附件/image%20with%20spaces.png)');
   });
 });
 

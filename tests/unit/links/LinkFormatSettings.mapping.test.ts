@@ -56,6 +56,15 @@ describe('LinkFormatSettings → LinkFormatter mapping', () => {
     expect(relative).toBe('![[./b/c.png]]');
   });
 
+  it('19.2 Markdown relative path to child folder omits current-directory prefix', async () => {
+    const { app, file } = makeAppWithFile('a/附件/c.png');
+    const formatter = new LinkFormatter(app);
+    const note = fakeTFile({ path: 'a/note.md' });
+
+    const relative = await formatter.formatLink(file.path, 'markdown', 'relative', note, null);
+    expect(relative).toBe('![](附件/c.png)');
+  });
+
   it('19.3 Relative path requires active note: throws when missing active note', async () => {
     const { app, file } = makeAppWithFile('a/b/c.png');
     const formatter = new LinkFormatter(app);

@@ -1,74 +1,50 @@
 # Obsidian Image Converter Pro AI 升级说明
 
-日期：2026-05-11
+日期：2026-05-12
 
 ## 文档目的
 
-这份文档是写给后续协助升级插件的 AI 的。
+这份文档是写给后续协助维护、升级、适配本插件源码仓库的 AI 的。
 
-目标不是让 AI “重新实现一遍功能”，而是让 AI：
+目标不是让 AI 重新设计功能，也不是让 AI 依赖历史目录结构推断实现，而是让 AI：
 
-- 基于源码仓库继续维护
-- 在上游插件更新后，迁移我们已经做过的附件右键菜单增强
-- 尽量减少因为官方升级带来的回归问题
+- 直接基于当前源码仓库继续维护
+- 在上游更新后，识别并保留我们已经验证通过的自定义能力
+- 优先根据当前源码、测试和构建结果完成适配
+- 尽量减少升级带来的回归问题
 
-## 当前项目结构
+## 根目录约定
 
-当前目录下有两个和本任务相关的内容：
+从现在开始，`obsidian-image-converter-pro` 本身就是项目根目录。
 
-### 1. 已安装使用的旧 bundle 版本
+后续所有路径、命令、文件说明，都默认基于项目根目录展开：
 
-路径：
+- 不要假设仓库位于某个固定磁盘路径
+- 不要在文档、脚本说明、任务提示中写死绝对路径
+- 本文档中出现的文件路径，均为相对项目根目录的相对路径
 
-- `D:\Desktop\ob插件优化2\image-converter`
+例如：
 
-说明：
+- `src/ContextMenu.ts`
+- `src/FolderAndFilenameManagement.ts`
+- `tests/integration/ui/ContextMenu.test.ts`
 
-- 这是已构建好的插件产物目录。
-- 里面的 `main.js` 是旧的 bundle 文件。
-- 这里曾经直接做过附件菜单增强，用来验证需求是否成立。
+## 当前已落地并需持续保留的能力
 
-### 2. 当前维护用的源码仓库
-
-路径：
-
-- `D:\Desktop\ob插件优化2\obsidian-image-converter-pro`
-
-说明：
-
-- 这是 fork 后 clone 下来的完整源码仓库。
-- 以后所有升级、迁移、适配，都应该优先基于这里的源码进行。
-- 不要再长期直接修改 bundle 版 `main.js`，除非只是临时验证。
-
-## 本次已经完成的源码迁移
-
-附件右键菜单增强已经正式迁移到源码仓库中。
-
-主要修改文件：
-
-- `D:\Desktop\ob插件优化2\obsidian-image-converter-pro\src\ContextMenu.ts`
-- `D:\Desktop\ob插件优化2\obsidian-image-converter-pro\tests\integration\ui\ContextMenu.test.ts`
-
-这意味着：
-
-- 相关能力现在已经存在于源码层
-- 以后更新插件时，应迁移这部分源码补丁，而不是重新从文档猜测实现
-
-## 当前自定义功能是什么
-
-我们在官方插件基础上增加了“非图片附件右键菜单增强”。
+当前自定义能力是“非图片附件右键菜单增强”。
 
 目标行为：
 
 - 图片附件继续使用原有图片菜单逻辑
-- 非图片附件新增右键菜单，包含：
+- 非图片附件可被右键识别并显示附件菜单
+- 非图片附件菜单必须包含以下 5 项：
   - `Name`
   - `Copy file`
   - `Show in navigation`
   - `Show in system explorer`
   - `Delete file and link`
 
-支持识别的非图片附件目标包括：
+当前支持识别的非图片附件目标包括：
 
 - `.file-embed`
 - `.file-embed-title`
@@ -78,11 +54,11 @@
 
 ## 关键源码位置
 
-如果 AI 需要理解或迁移这项能力，优先查看这些文件：
+如果 AI 需要理解、适配或迁移这项能力，优先查看以下文件。
 
 ### 右键菜单主入口
 
-- `D:\Desktop\ob插件优化2\obsidian-image-converter-pro\src\ContextMenu.ts`
+- `src/ContextMenu.ts`
 
 重点关注的方法：
 
@@ -99,7 +75,7 @@
 
 ### 路径解析与安全重命名
 
-- `D:\Desktop\ob插件优化2\obsidian-image-converter-pro\src\FolderAndFilenameManagement.ts`
+- `src/FolderAndFilenameManagement.ts`
 
 重点关注的方法：
 
@@ -109,26 +85,37 @@
 
 ### 相关测试
 
-- `D:\Desktop\ob插件优化2\obsidian-image-converter-pro\tests\integration\ui\ContextMenu.test.ts`
+- `tests/integration/ui/ContextMenu.test.ts`
 
 说明：
 
-- 这里已经补了附件菜单相关测试
-- 以后升级后如果行为变了，应优先修复源码，再更新测试
+- 这里已经覆盖了附件菜单相关测试
+- 升级后如果行为变化，应优先修复源码，再按需要调整测试
 
-## AI 应该怎么做
+## AI 工作原则
 
-## 总原则
+### 总原则
 
-请不要从头重写功能。
+不要从头重写功能。
 
 你要做的是：
 
-- 识别我们相对官方源码做过哪些补丁
-- 判断上游新版是否已经覆盖其中一部分
-- 只迁移仍然需要保留的补丁
+- 识别当前源码仓库中已经存在的附件菜单增强实现
+- 对比上游新版本是否已覆盖其中一部分
+- 只保留仍然必要的改动
+- 基于验证结果继续操作源码，而不是依赖历史背景猜实现
 
-换句话说，目标是“补丁迁移”，不是“重新设计功能”。
+换句话说，目标是“基于当前已验证实现做适配”，不是“重新发明一套功能”。
+
+### 源码优先
+
+长期维护必须优先修改源码文件，而不是把直接修改构建产物作为正式方案。
+
+如需定位功能，请优先查看：
+
+- `src/ContextMenu.ts`
+- `src/FolderAndFilenameManagement.ts`
+- `tests/integration/ui/ContextMenu.test.ts`
 
 ## 推荐工作流程
 
@@ -152,7 +139,7 @@ git log --oneline --decorate -n 10
 
 如果已经配置了 `upstream`，先抓取上游最新代码。
 
-如果没有配置 `upstream`，应先补上原作者仓库地址，再抓取。
+如果没有配置 `upstream`，先补充上游仓库地址，再抓取。
 
 推荐流程：
 
@@ -162,78 +149,77 @@ git fetch upstream
 git branch -a
 ```
 
-### 第三步：先对比我们改过什么
+### 第三步：先对比当前源码里已经有什么
 
 升级前不要直接改文件。
 
-先看当前 fork 中，附件菜单增强究竟改了什么，重点看：
+先确认当前仓库里，附件菜单增强具体落在哪些源码和测试上，重点看：
 
 - `src/ContextMenu.ts`
+- `src/FolderAndFilenameManagement.ts`
 - `tests/integration/ui/ContextMenu.test.ts`
 
 如果仓库里已经有对应 commit，优先查看 commit diff。
 
 如果没有 commit，则直接查看当前工作树改动。
 
-### 第四步：再对比上游新版
+### 第四步：再对比上游新版结构
 
 重点确认：
 
-- 上游 `ContextMenu.ts` 结构是否有变化
+- 上游 `src/ContextMenu.ts` 结构是否变化
 - 图片右键菜单逻辑是否重构
-- `FolderAndFilenameManagement.ts` 的路径解析与重命名逻辑是否变化
-- 测试文件结构是否变化
+- `src/FolderAndFilenameManagement.ts` 的路径解析与重命名逻辑是否变化
+- `tests/integration/ui/ContextMenu.test.ts` 的测试结构是否变化
 
 如果上游已经新增了部分附件支持，先识别重叠部分，避免重复实现。
 
-### 第五步：迁移补丁
+### 第五步：做最小必要适配
 
-迁移时遵守下面这些约束：
+适配时遵守以下约束：
 
 - 保持图片原有逻辑不变
-- 只在右键入口增加附件分支
-- 尽量复用官方已有路径解析和重命名逻辑
+- 只在需要的位置保留附件分支
+- 尽量复用现有路径解析和重命名逻辑
 - 非图片附件新增的 5 个动作必须保留
-- 测试必须同步更新
+- 测试必须同步验证
 
 ### 第六步：验证
 
-迁移后至少运行：
+适配后至少运行：
+
+```powershell
+npx vitest run tests/integration/ui/ContextMenu.test.ts
+npm run build
+```
+
+如果改动范围较大，建议再运行：
 
 ```powershell
 npm test
-npx vitest run tests/integration/ui/ContextMenu.test.ts
-npm run build
 ```
 
-如果只想先快速验证附件菜单相关改动，至少运行：
+## 当前已验证通过的命令
+
+以下命令已经在当前仓库中验证通过，可作为后续工作的基线验证：
 
 ```powershell
 npx vitest run tests/integration/ui/ContextMenu.test.ts
 npm run build
 ```
 
-## 本次迁移已经验证通过的命令
-
-在当前仓库中，以下命令已经跑通过：
-
-```powershell
-npx vitest run tests/integration/ui/ContextMenu.test.ts
-npm run build
-```
-
-说明：
+这说明：
 
 - `ContextMenu` 相关测试已通过
-- 源码构建已通过
+- 当前源码可以正常构建
 
-## AI 在升级时必须保留的功能点
+## 升级后必须确认的结果
 
-升级后，请确认以下能力仍然存在：
+升级或适配完成后，必须确认以下事项仍然成立：
 
 1. 图片右键菜单仍正常工作
-2. 非图片附件可被右键识别
-3. 附件菜单仍有以下 5 项：
+2. 非图片附件仍可被右键识别
+3. 附件菜单仍保留以下 5 项：
    - `Name`
    - `Copy file`
    - `Show in navigation`
@@ -241,37 +227,37 @@ npm run build
    - `Delete file and link`
 4. 重命名时保留原始扩展名
 5. 删除附件时会移除当前笔记中的链接并将文件移入回收站
-6. `ContextMenu` 相关测试通过
+6. `tests/integration/ui/ContextMenu.test.ts` 相关测试通过
 7. 项目可以正常构建
 
 ## AI 不应该做的事情
 
 请不要做这些事：
 
-- 不要直接只改 `image-converter/main.js` 作为长期方案
-- 不要绕过源码层，只做 bundle 层修补
-- 不要在没有对比上游结构的情况下重写整个 `ContextMenu.ts`
+- 不要脱离当前源码现状，凭历史印象重写功能
+- 不要在没有对比上游结构的情况下重写整个 `src/ContextMenu.ts`
+- 不要只为通过测试而移除附件功能
 - 不要无故删除现有测试
-- 不要为了通过测试而移除附件功能
 - 不要修改与本次升级无关的大量模块
+- 不要在文档、说明或任务提示里继续依赖旧目录结构
 
-## 如果发生冲突，优先级怎么判断
+## 发生冲突时的优先级
 
 优先级建议如下：
 
-1. 保证插件能正常构建
+1. 保证项目能正常构建
 2. 保证图片原有菜单不回归
 3. 保证附件菜单增强功能仍可用
-4. 保证测试通过
-5. 最后再考虑是否需要进一步重构代码
+4. 保证相关测试通过
+5. 最后再考虑是否需要进一步重构
 
-如果上游改动很大，不要强行机械套 patch。
+如果上游改动很大，不要机械套用旧改动。
 
-应该先输出：
+应先输出：
 
 - 哪些结构发生了变化
-- 哪些补丁可以直接迁移
-- 哪些补丁需要重新适配
+- 哪些现有实现可以直接保留
+- 哪些逻辑需要重新适配
 - 哪些行为需要手动验证
 
 ## 交付时应输出什么
@@ -279,40 +265,87 @@ npm run build
 完成升级后，请输出：
 
 1. 修改了哪些源码文件
-2. 哪些旧补丁被保留
+2. 保留了哪些现有能力
 3. 哪些逻辑因为上游更新做了适配调整
-4. 跑了哪些测试/构建命令
-5. 还有哪些残余风险
-
-## 可参考文档
-
-如果需要了解旧 bundle 阶段的改动背景，可以参考：
-
-- `D:\Desktop\ob插件优化2\image-converter-attachment-menu-change-log.md`
-
-这份文档偏历史复盘和工作流说明。
-
-如果需要理解这次功能目标，请优先以源码现状为准，不要只依赖历史文档猜实现。
+4. 跑了哪些测试或构建命令
+5. 还存在哪些残余风险
 
 ## 给 AI 的一句话任务模板
 
 可以直接使用下面这段作为升级任务提示：
 
 ```text
-请基于 D:\Desktop\ob插件优化2\obsidian-image-converter-pro 这个源码仓库工作。
+请基于当前项目根目录中的源码仓库工作。
 
-目标不是从头重写功能，而是把我们已经做过的“非图片附件右键菜单增强”补丁迁移到上游最新版。
+目标不是从头重写功能，而是基于当前已经验证通过的实现，保留并适配“非图片附件右键菜单增强”能力。
 
 请按以下顺序执行：
 1. 检查当前 git 状态、分支、远程仓库
-2. 对比当前 fork 与上游最新版
-3. 识别 ContextMenu.ts 中已有的附件菜单增强补丁
-4. 将这些补丁迁移到上游新版源码结构中
+2. 对比当前仓库与上游最新版
+3. 识别 `src/ContextMenu.ts`、`src/FolderAndFilenameManagement.ts`、`tests/integration/ui/ContextMenu.test.ts` 中与附件菜单增强相关的现有实现
+4. 将仍然必要的实现适配到上游最新源码结构中
 5. 保持图片原有逻辑不变
-6. 同步更新 tests/integration/ui/ContextMenu.test.ts
-7. 运行 npx vitest run tests/integration/ui/ContextMenu.test.ts
-8. 运行 npm run build
+6. 同步验证 `tests/integration/ui/ContextMenu.test.ts`
+7. 运行 `npx vitest run tests/integration/ui/ContextMenu.test.ts`
+8. 运行 `npm run build`
 9. 输出修改文件、验证结果、风险点
 
-不要长期直接修改 bundle 版 main.js，优先维护源码仓库。
+不要依赖旧目录结构、历史 bundle 改法或绝对路径；优先依据当前源码与验证结果完成工作。
 ```
+
+## 2026-05-12 变更记录：markdown 相对路径去掉 `./`
+
+### 现象
+
+当插件启用“markdown 形式的相对路径”插入附件时，当前实现会生成：
+
+```md
+![](./附件/【003】Obsidian_网页访问_202605121005.jpeg)
+```
+
+但 Obsidian 默认插入同类附件时，路径通常为：
+
+```md
+![](附件/【003】Obsidian_网页访问_202605121005.jpeg)
+```
+
+两者差异仅在于前缀 `./`。
+
+### 本次调整
+
+- 修改 `src/LinkFormatter.ts`
+- 仅调整 `markdown + relative` 的输出规则
+- 当相对路径不需要使用 `../` 回退父目录时，不再强制补 `./`
+- 因此子路径和同级路径会输出为：
+  - `附件/xxx.png`
+  - `image.png`
+- 如果路径本来就需要回退父目录，仍然保持：
+  - `../images/xxx.png`
+
+### 明确保留的行为
+
+- `wikilink` 的相对路径逻辑不变，仍可保留显式 `./`
+- 绝对路径逻辑不变
+- markdown 路径中的空格仍继续编码为 `%20`
+- 本次不处理插入后文件重命名问题
+
+### 这次改动涉及的文件
+
+- `src/LinkFormatter.ts`
+- `tests/unit/links/LinkFormatter.test.ts`
+- `tests/unit/links/LinkFormatSettings.mapping.test.ts`
+
+### 升级时的注意事项
+
+以后如果上游再次修改链接生成逻辑，优先检查 `src/LinkFormatter.ts` 中的相对路径格式化分支，确认以下约束仍然成立：
+
+1. `wikilink + relative` 可以保留 `./`
+2. `markdown + relative` 在子路径或同级路径下不要补 `./`
+3. `markdown + relative` 在父级路径下必须继续保留 `../`
+
+### 本次新增/更新的验证点
+
+- markdown 相对路径指向同级文件时，不带 `./`
+- markdown 相对路径指向当前笔记下的子目录附件时，不带 `./`
+- markdown 相对路径指向父目录文件时，继续保留 `../`
+- wikilink 相对路径保持原行为

@@ -68,7 +68,7 @@ export class LinkFormatter {
             case "absolute":
                 return this.formatAbsolutePath(file);
             case "relative":
-                return this.formatRelativePath(file, activeFile);
+                return this.formatRelativePath(file, activeFile, linkFormat);
             default:
                 throw new Error(`Invalid path format: ${pathFormat as string}`);
         }
@@ -79,7 +79,11 @@ export class LinkFormatter {
         return `/${file.path}`; // Add the leading slash back
     }
 
-    private formatRelativePath(file: TFile, activeFile: TFile | null): string {
+    private formatRelativePath(
+        file: TFile,
+        activeFile: TFile | null,
+        linkFormat: LinkFormat
+    ): string {
         if (!activeFile) {
             throw new Error("Cannot format relative path without an active file.");
         }
@@ -90,7 +94,11 @@ export class LinkFormatter {
 
         const relativePath = this.getRelativePath(activeFile.path, file.path);
 
-        // Always ensure we have either ./ or ../ prefix
+        if (linkFormat === "markdown") {
+            return relativePath.replace(/^\.\//, "");
+        }
+
+        // Wikilink keeps the explicit current-directory prefix.
         if (!relativePath.startsWith('../') && !relativePath.startsWith('./')) {
             return `./${relativePath}`;
         }
