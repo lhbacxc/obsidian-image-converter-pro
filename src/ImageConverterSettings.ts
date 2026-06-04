@@ -203,6 +203,7 @@ export interface ImageConverterSettings {
     isDragAspectRatioLocked: boolean;
     isScrollResizeEnabled: boolean;
     isResizeInReadingModeEnabled: boolean;
+    enableImageClickZoom: boolean;
     disableObsidianImageSelectionOnClick: boolean;
 
     resizeSensitivity: number;
@@ -402,6 +403,7 @@ export const DEFAULT_SETTINGS: ImageConverterSettings = {
     isScrollResizeEnabled: true,
     isDragAspectRatioLocked: true,
     isResizeInReadingModeEnabled: false,
+    enableImageClickZoom: true,
     disableObsidianImageSelectionOnClick: false,
 
     resizeSensitivity: 0.1,
@@ -974,6 +976,18 @@ export class ImageConverterSettingTab extends PluginSettingTab {
                 setIcon(dragResizeChevronIcon, "chevron-down");
             }
         });
+
+        new Setting(imageDragResizeSection)
+            .setName("Enable image click zoom")
+            .setDesc("Open a temporary full-screen preview when clicking an image. Mouse wheel zoom in the preview does not change the note.")
+            .addToggle((toggle) =>
+                toggle
+                    .setValue(this.plugin.settings.enableImageClickZoom)
+                    .onChange(async (value) => {
+                        this.plugin.settings.enableImageClickZoom = value;
+                        await this.plugin.saveSettings();
+                    })
+            );
 
         if (this.plugin.settings.isImageResizeEnbaled) { // Conditionally render cleanup options
             // --- Checkboxes for Drag and Scroll Resize ---

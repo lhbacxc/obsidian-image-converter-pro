@@ -1,3 +1,13 @@
+# 增加的功能
+在原本功能的基础上 **增加** 了下述功能：
+
+- 增加支持对非图片附件的右键菜单操作
+- 当以相对路径的形式插入时，去掉默认的 `./`，即从 `[](./附件名称)` 更改为 `[](附件名称)`
+- 图片点击放大预览，可使用滚轮再进行调节和使用鼠标进行拖动平移
+
+# TODO
+- 附件以卡片的形式进行展示，不同的附件类型有不同的卡片样式，可以参考 Attachflow 的样式
+
 # Image Converter for ObsidianMD
 
 Making image management inside Obsidian slightly more convenient.

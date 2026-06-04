@@ -64,6 +64,20 @@ export class ImageResizer extends Component {
 
     private scrollTimeout: number | null = null;
     private readonly SCROLL_DEBOUNCE_MS = 300;
+    private lightboxOverlay: HTMLElement | null = null;
+    private lightboxImage: HTMLImageElement | null = null;
+    private lightboxScope: Component | null = null;
+    private lightboxScale = 1;
+    private lightboxPanX = 0;
+    private lightboxPanY = 0;
+    private lightboxDragStartX = 0;
+    private lightboxDragStartY = 0;
+    private lightboxDragOriginX = 0;
+    private lightboxDragOriginY = 0;
+    private isLightboxDragging = false;
+    private readonly LIGHTBOX_MIN_SCALE = 0.2;
+    private readonly LIGHTBOX_MAX_SCALE = 8;
+    private readonly LIGHTBOX_ZOOM_STEP = 0.12;
 
 
     resizeSensitivity: number;
@@ -127,8 +141,8 @@ export class ImageResizer extends Component {
             this.viewScope = null;
         }
 
-        // Only register events if master switch is enabled
-        if (this.plugin.settings.isImageResizeEnbaled) {
+        // Register this component when any image interaction feature is enabled.
+        if (this.plugin.settings.isImageResizeEnbaled || this.plugin.settings.enableImageClickZoom) {
             // Create a fresh scope for this view and parent it to this component
             this.viewScope = new Component();
             this.addChild(this.viewScope);
@@ -164,6 +178,7 @@ export class ImageResizer extends Component {
         this.resizeRetryTimers = {};
 
         // Clean up DOM elements
+        this.closeImageLightbox();
         this.cleanupHandles();
 
         // Reset state
@@ -196,6 +211,7 @@ export class ImageResizer extends Component {
         this.cachedEditorMaxWidth = null;
         
         // Handle layout changes (e.g., reposition handles)
+        this.closeImageLightbox();
         this.cleanupHandles();
         this.attachView(markdownView);
         if (this.lastMouseEvent) {
@@ -271,6 +287,26 @@ export class ImageResizer extends Component {
         return image instanceof HTMLImageElement ? image : null;
     }
 
+    private getImageTargetForClickZoom(event: MouseEvent): HTMLImageElement | null {
+        if (!this.markdownView) return null;
+        if (!this.plugin.settings.enableImageClickZoom) return null;
+        if (this.resizeState.isResizing || this.resizeState.isDragging) return null;
+        if (event.button !== 0) return null;
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return null;
+
+        const { target } = event;
+        if (!(target instanceof HTMLElement)) return null;
+        if (!this.markdownView.containerEl.contains(target)) return null;
+        if (target.closest(".image-converter-lightbox-overlay")) return null;
+        if (target.closest(".image-resize-handle, .edit-block-button, .map-view-main")) return null;
+
+        const image = this.resolveImageTarget(target);
+        if (!image) return null;
+        if (this.plugin.supportedImageFormats.isExcalidrawImage(image)) return null;
+
+        return image;
+    }
+
     private getInternalImageTargetForClickOverride(event: MouseEvent): HTMLImageElement | null {
         if (!this.editor || !this.markdownView) return null;
         if (!this.plugin.settings.disableObsidianImageSelectionOnClick) return null;
@@ -316,12 +352,141 @@ export class ImageResizer extends Component {
     };
 
     private handleImageClickCapture = (event: MouseEvent) => {
+        const zoomImage = this.getImageTargetForClickZoom(event);
+        if (zoomImage) {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+            this.openImageLightbox(zoomImage);
+            return;
+        }
+
         if (!this.getInternalImageTargetForClickOverride(event)) return;
 
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation();
     };
+
+    private openImageLightbox(image: HTMLImageElement): void {
+        const src = image.currentSrc || image.src || image.getAttribute("src");
+        if (!src) return;
+
+        this.closeImageLightbox();
+
+        const overlay = document.createElement("div");
+        overlay.className = "image-converter-lightbox-overlay";
+
+        const previewImage = document.createElement("img");
+        previewImage.className = "image-converter-lightbox-image";
+        previewImage.src = src;
+        previewImage.alt = image.alt || image.getAttribute("alt") || "";
+        previewImage.draggable = false;
+
+        this.lightboxOverlay = overlay;
+        this.lightboxImage = previewImage;
+        this.lightboxScale = 1;
+        this.lightboxPanX = 0;
+        this.lightboxPanY = 0;
+        this.isLightboxDragging = false;
+        this.applyLightboxScale();
+
+        overlay.appendChild(previewImage);
+        document.body.appendChild(overlay);
+        document.body.addClass("image-converter-lightbox-open");
+
+        this.lightboxScope = new Component();
+        this.addChild(this.lightboxScope);
+        this.lightboxScope.registerDomEvent(overlay, "click", this.handleLightboxOverlayClick);
+        this.lightboxScope.registerDomEvent(overlay, "wheel", this.handleLightboxWheel, { passive: false });
+        this.lightboxScope.registerDomEvent(previewImage, "mousedown", this.handleLightboxImageMouseDown);
+        this.lightboxScope.registerDomEvent(previewImage, "dragstart", this.handleLightboxImageDragStart);
+        this.lightboxScope.registerDomEvent(document, "mousemove", this.handleLightboxImageMouseMove);
+        this.lightboxScope.registerDomEvent(document, "mouseup", this.handleLightboxImageMouseUp);
+    }
+
+    private closeImageLightbox(): void {
+        if (!this.lightboxOverlay) return;
+
+        this.lightboxScope?.unload();
+        this.lightboxScope = null;
+        if (typeof this.lightboxOverlay.detach === "function") {
+            this.lightboxOverlay.detach();
+        } else {
+            this.lightboxOverlay.remove();
+        }
+        this.lightboxOverlay = null;
+        this.lightboxImage = null;
+        this.lightboxScale = 1;
+        this.lightboxPanX = 0;
+        this.lightboxPanY = 0;
+        this.isLightboxDragging = false;
+        document.body.removeClass("image-converter-lightbox-open");
+    }
+
+    private handleLightboxOverlayClick = (event: MouseEvent): void => {
+        if (event.target !== this.lightboxOverlay) return;
+        this.closeImageLightbox();
+    };
+
+    private handleLightboxWheel = (event: WheelEvent): void => {
+        if (!this.lightboxImage) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        const direction = event.deltaY < 0 ? 1 : -1;
+        const nextScale = this.lightboxScale * (1 + direction * this.LIGHTBOX_ZOOM_STEP);
+        this.lightboxScale = Math.min(
+            this.LIGHTBOX_MAX_SCALE,
+            Math.max(this.LIGHTBOX_MIN_SCALE, nextScale)
+        );
+        this.applyLightboxScale();
+    };
+
+    private handleLightboxImageMouseDown = (event: MouseEvent): void => {
+        if (!this.lightboxImage || event.button !== 0) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        this.isLightboxDragging = true;
+        this.lightboxDragStartX = event.clientX;
+        this.lightboxDragStartY = event.clientY;
+        this.lightboxDragOriginX = this.lightboxPanX;
+        this.lightboxDragOriginY = this.lightboxPanY;
+        this.lightboxImage.addClass("image-converter-lightbox-image-dragging");
+    };
+
+    private handleLightboxImageMouseMove = (event: MouseEvent): void => {
+        if (!this.lightboxImage || !this.isLightboxDragging) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        this.lightboxPanX = this.lightboxDragOriginX + event.clientX - this.lightboxDragStartX;
+        this.lightboxPanY = this.lightboxDragOriginY + event.clientY - this.lightboxDragStartY;
+        this.applyLightboxScale();
+    };
+
+    private handleLightboxImageMouseUp = (event: MouseEvent): void => {
+        if (!this.isLightboxDragging) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        this.isLightboxDragging = false;
+        this.lightboxImage?.removeClass("image-converter-lightbox-image-dragging");
+    };
+
+    private handleLightboxImageDragStart = (event: DragEvent): void => {
+        event.preventDefault();
+    };
+
+    private applyLightboxScale(): void {
+        if (!this.lightboxImage) return;
+        this.lightboxImage.style.transform = `translate(${Math.round(this.lightboxPanX)}px, ${Math.round(this.lightboxPanY)}px) scale(${this.lightboxScale.toFixed(3)})`;
+    }
 
     private handleImageHover = (event: MouseEvent) => {
         // Skip hover logic if a scroll-wheel resize is in progress
@@ -861,6 +1026,7 @@ export class ImageResizer extends Component {
      */
     private handleMouseWheel = (event: WheelEvent) => {
         // Early permission check
+        if (!this.plugin.settings.isImageResizeEnbaled) return;
         if (!this.plugin.settings.isScrollResizeEnabled) return;
         if (!this.checkModifierKey(event)) return;
 

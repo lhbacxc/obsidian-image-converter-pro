@@ -31,7 +31,12 @@
 
 ## 当前已落地并需持续保留的能力
 
-当前自定义能力是“非图片附件右键菜单增强”。
+当前自定义能力包括：
+
+- 非图片附件右键菜单增强
+- 图片点击放大预览
+
+### 非图片附件右键菜单增强
 
 目标行为：
 
@@ -52,9 +57,36 @@
 - `video`
 - `iframe`
 
+### 图片点击放大预览
+
+目标行为：
+
+- 笔记内图片支持左键点击放大预览
+- 点击放大后的遮罩空白区域可关闭预览并回到笔记
+- 放大预览中使用鼠标滚轮可继续放大或缩小图片
+- 放大预览中可按住鼠标左键拖动图片，查看被放大后的具体细节
+- 预览中的滚轮缩放和鼠标拖动只改变临时显示，不修改图片文件、不写回 markdown 链接尺寸、不写入对齐缓存
+
+当前实现约束：
+
+- 由独立设置项 `enableImageClickZoom` 控制，默认开启
+- 即使关闭拖拽/滚轮 resize 总开关，点击放大预览仍可独立工作
+- 跳过 Excalidraw 图片、`.map-view-main`、resize handle、编辑按钮和 lightbox 自身
+- 不处理非图片附件，避免影响附件菜单增强
+- 不修改 `src/ContextMenu.ts` 的右键菜单逻辑
+- lightbox 遮罩应保持半透明但不要过深，当前为 `rgba(0, 0, 0, 0.58)`
+- lightbox 内部拖动使用临时 `translate(...) scale(...)`，不得复用笔记内图片 resize 写回逻辑
+
+当前 lightbox 相关 DOM/CSS 类：
+
+- `.image-converter-lightbox-overlay`
+- `.image-converter-lightbox-image`
+- `.image-converter-lightbox-image-dragging`
+- `.image-converter-lightbox-open`
+
 ## 关键源码位置
 
-如果 AI 需要理解、适配或迁移这项能力，优先查看以下文件。
+如果 AI 需要理解、适配或迁移这些能力，优先查看以下文件。
 
 ### 右键菜单主入口
 
@@ -92,6 +124,46 @@
 - 这里已经覆盖了附件菜单相关测试
 - 升级后如果行为变化，应优先修复源码，再按需要调整测试
 
+### 图片点击放大预览与图片交互
+
+- `src/ImageResizer.ts`
+- `src/ImageConverterSettings.ts`
+- `src/main.ts`
+- `styles.css`
+
+重点关注的方法和字段：
+
+- `ImageConverterSettings.enableImageClickZoom`
+- `DEFAULT_SETTINGS.enableImageClickZoom`
+- `ImageResizer.attachView`
+- `ImageResizer.getImageTargetForClickZoom`
+- `ImageResizer.handleImageClickCapture`
+- `ImageResizer.openImageLightbox`
+- `ImageResizer.closeImageLightbox`
+- `ImageResizer.handleLightboxWheel`
+- `ImageResizer.handleLightboxImageMouseDown`
+- `ImageResizer.handleLightboxImageMouseMove`
+- `ImageResizer.handleLightboxImageMouseUp`
+- `ImageResizer.applyLightboxScale`
+- `ImageResizer.handleMouseWheel`
+
+说明：
+
+- `ImageResizer` 现在不只负责拖拽/滚轮 resize，也负责图片点击放大预览
+- `src/main.ts` 中初始化 `ImageResizer` 的条件必须同时考虑 `isImageResizeEnbaled` 和 `enableImageClickZoom`
+- `handleMouseWheel` 必须保留 `isImageResizeEnbaled` 总开关判断，避免用户只启用点击放大时误触笔记内图片尺寸写回
+- lightbox 内部滚轮缩放和笔记内滚轮 resize 是两条不同路径，不要混在一起
+- lightbox 内部鼠标拖动只应更新预览图位移，不应触发笔记内 drag resize 或 markdown 链接尺寸更新
+
+### 图片点击放大预览相关测试
+
+- `tests/integration/ui/ImageResizer.test.ts`
+
+说明：
+
+- 已覆盖点击打开、点击空白关闭、预览滚轮缩放、预览左键拖动平移、设置关闭时不打开、关闭 resize 总开关时仍可点击放大
+- 升级后如果图片交互或 `ImageResizer` 生命周期变化，应同步运行并修复这些测试
+
 ## AI 工作原则
 
 ### 总原则
@@ -115,7 +187,10 @@
 
 - `src/ContextMenu.ts`
 - `src/FolderAndFilenameManagement.ts`
+- `src/ImageResizer.ts`
+- `src/ImageConverterSettings.ts`
 - `tests/integration/ui/ContextMenu.test.ts`
+- `tests/integration/ui/ImageResizer.test.ts`
 
 ## 推荐工作流程
 
@@ -182,6 +257,9 @@ git branch -a
 - 只在需要的位置保留附件分支
 - 尽量复用现有路径解析和重命名逻辑
 - 非图片附件新增的 5 个动作必须保留
+- 图片点击放大预览必须保持独立设置开关，不要强制依赖拖拽/滚轮 resize 总开关
+- lightbox 预览滚轮缩放不得写回 markdown 链接尺寸
+- lightbox 预览鼠标拖动不得写回 markdown 链接尺寸，也不得写入对齐缓存
 - 测试必须同步验证
 
 ### 第六步：验证
@@ -190,6 +268,7 @@ git branch -a
 
 ```powershell
 npx vitest run tests/integration/ui/ContextMenu.test.ts
+npx vitest run tests/integration/ui/ImageResizer.test.ts tests/integration/ui/ContextMenu.test.ts
 npm run build
 ```
 
@@ -205,12 +284,16 @@ npm test
 
 ```powershell
 npx vitest run tests/integration/ui/ContextMenu.test.ts
+npx vitest run tests/integration/ui/ImageResizer.test.ts tests/integration/ui/ContextMenu.test.ts
+npm test
 npm run build
 ```
 
 这说明：
 
 - `ContextMenu` 相关测试已通过
+- `ImageResizer` 图片点击放大预览及旧图片缩放相关测试已通过
+- 全量测试已通过
 - 当前源码可以正常构建
 
 ## 升级后必须确认的结果
@@ -227,8 +310,15 @@ npm run build
    - `Delete file and link`
 4. 重命名时保留原始扩展名
 5. 删除附件时会移除当前笔记中的链接并将文件移入回收站
-6. `tests/integration/ui/ContextMenu.test.ts` 相关测试通过
-7. 项目可以正常构建
+6. 点击笔记内图片可以打开放大预览
+7. 点击放大预览的空白遮罩区域可以关闭预览
+8. 放大预览中鼠标滚轮可以临时放大/缩小图片
+9. 放大预览中鼠标左键拖动图片可以临时平移查看细节
+10. 放大预览缩放和拖动不会修改笔记中的图片尺寸链接
+11. 关闭 `enableImageClickZoom` 后点击图片不再打开预览
+12. `tests/integration/ui/ContextMenu.test.ts` 相关测试通过
+13. `tests/integration/ui/ImageResizer.test.ts` 相关测试通过
+14. 项目可以正常构建
 
 ## AI 不应该做的事情
 
@@ -240,6 +330,9 @@ npm run build
 - 不要无故删除现有测试
 - 不要修改与本次升级无关的大量模块
 - 不要在文档、说明或任务提示里继续依赖旧目录结构
+- 不要把图片点击放大预览实现成修改 markdown 尺寸的持久化缩放
+- 不要把 lightbox 预览拖动实现成笔记内图片尺寸拖拽
+- 不要让 lightbox 内部图片点击再次触发笔记图片点击逻辑
 
 ## 发生冲突时的优先级
 
@@ -248,8 +341,9 @@ npm run build
 1. 保证项目能正常构建
 2. 保证图片原有菜单不回归
 3. 保证附件菜单增强功能仍可用
-4. 保证相关测试通过
-5. 最后再考虑是否需要进一步重构
+4. 保证图片点击放大预览不影响拖拽/滚轮 resize 的尺寸写回逻辑
+5. 保证相关测试通过
+6. 最后再考虑是否需要进一步重构
 
 如果上游改动很大，不要机械套用旧改动。
 
@@ -349,3 +443,64 @@ npm run build
 - markdown 相对路径指向当前笔记下的子目录附件时，不带 `./`
 - markdown 相对路径指向父目录文件时，继续保留 `../`
 - wikilink 相对路径保持原行为
+
+## 2026-06-04 变更记录：图片点击放大预览支持拖动平移
+
+### 现象
+
+图片点击放大预览已经支持鼠标滚轮临时缩放，但放大后只能围绕中心查看，无法通过鼠标拖动移动预览图来查看图片局部细节。
+
+同时原 lightbox 遮罩颜色较深，背景被压暗过多。
+
+### 本次调整
+
+- 修改 `src/ImageResizer.ts`
+- 修改 `styles.css`
+- 更新 `tests/integration/ui/ImageResizer.test.ts`
+- lightbox 遮罩从 `rgba(0, 0, 0, 0.86)` 调整为 `rgba(0, 0, 0, 0.58)`
+- lightbox 预览图支持鼠标左键按住拖动平移
+- lightbox 预览图的临时显示状态统一使用 `translate(...) scale(...)`
+
+### 明确保留的行为
+
+- 点击笔记内图片仍通过 `enableImageClickZoom` 独立控制，默认开启
+- 关闭拖拽/滚轮 resize 总开关时，点击放大预览仍可独立工作
+- 点击 lightbox 空白遮罩区域仍可关闭预览
+- lightbox 内鼠标滚轮缩放仍只改变临时显示
+- lightbox 内鼠标左键拖动仍只改变临时显示
+- 预览缩放和拖动都不修改图片文件、不写回 markdown 链接尺寸、不写入对齐缓存
+- 笔记内图片滚轮 resize 仍必须受 `isImageResizeEnbaled` 总开关控制
+
+### 这次改动涉及的文件
+
+- `src/ImageResizer.ts`
+- `styles.css`
+- `tests/integration/ui/ImageResizer.test.ts`
+
+### 升级时的注意事项
+
+以后如果上游修改 `src/ImageResizer.ts` 的事件注册或 lightbox 结构，优先确认以下约束仍然成立：
+
+1. lightbox 内部滚轮缩放和笔记内滚轮 resize 是两条不同路径
+2. lightbox 内部鼠标拖动平移不触发笔记内 drag resize
+3. lightbox 临时 transform 包含位移和缩放，即 `translate(...) scale(...)`
+4. lightbox 内部交互不会写回 markdown 图片尺寸链接
+5. `.image-converter-lightbox-image-dragging` 仅表示预览图拖动状态
+
+### 本次新增/更新的验证点
+
+- 点击图片后可以打开 lightbox 预览
+- 点击 lightbox 空白遮罩区域可以关闭预览
+- lightbox 内滚轮缩放会更新预览图 `transform`
+- lightbox 内鼠标左键拖动会更新预览图 `transform`
+- lightbox 内滚轮缩放和拖动不会修改原笔记图片尺寸
+- 关闭 `enableImageClickZoom` 后点击图片不打开预览
+- 关闭 `isImageResizeEnbaled` 后点击放大预览仍可独立工作
+
+### 本次已验证命令
+
+```powershell
+npx vitest run tests/integration/ui/ImageResizer.test.ts
+npm run build
+git diff --check
+```

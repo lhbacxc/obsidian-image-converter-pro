@@ -112,6 +112,7 @@ function makeResizer({ viewMode = 'source', overrides = {}, workspaceOverride }:
     scrollwheelModifier: 'None',
     isImageAlignmentEnabled: false,
     isResizeInReadingModeEnabled: true,
+    enableImageClickZoom: true,
     disableObsidianImageSelectionOnClick: false,
     dropPasteCursorLocation: 'back',
     resizeCursorLocation: 'front'
@@ -461,6 +462,115 @@ describe('ImageResizer additional behaviors (13.4–13.6, 13.7–13.14, 13.19, 1
     const container = (img as any).matchParent('.image-resize-container');
     expect(container).toBeTruthy();
     expect(container.querySelector('.image-resize-handle-se')).toBeTruthy();
+  });
+
+  it('13.32 Image click zoom: given enabled setting, when clicking an image, then a lightbox preview opens', () => {
+    makeResizer({ viewMode: 'preview', overrides: { enableImageClickZoom: true } });
+    const { img } = setupViewWithImage();
+
+    const prevented = img.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+
+    expect(prevented).toBe(false);
+    const overlay = document.querySelector('.image-converter-lightbox-overlay');
+    const previewImage = document.querySelector('.image-converter-lightbox-image') as HTMLImageElement | null;
+    expect(overlay).toBeTruthy();
+    expect(previewImage?.src).toContain('pic.jpg');
+    expect(document.body.classList.contains('image-converter-lightbox-open')).toBe(true);
+  });
+
+  it('13.33 Image click zoom closes only when clicking blank overlay space', () => {
+    makeResizer({ viewMode: 'preview', overrides: { enableImageClickZoom: true } });
+    const { img } = setupViewWithImage();
+
+    img.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    const overlay = document.querySelector('.image-converter-lightbox-overlay') as HTMLElement;
+    const previewImage = document.querySelector('.image-converter-lightbox-image') as HTMLImageElement;
+
+    previewImage.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    expect(document.querySelector('.image-converter-lightbox-overlay')).toBeTruthy();
+
+    overlay.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    expect(document.querySelector('.image-converter-lightbox-overlay')).toBeNull();
+    expect(document.body.classList.contains('image-converter-lightbox-open')).toBe(false);
+  });
+
+  it('13.34 Image click zoom wheel changes preview scale without touching note image size', () => {
+    makeResizer({ viewMode: 'preview', overrides: { enableImageClickZoom: true } });
+    const { img } = setupViewWithImage();
+
+    img.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    const overlay = document.querySelector('.image-converter-lightbox-overlay') as HTMLElement;
+    const previewImage = document.querySelector('.image-converter-lightbox-image') as HTMLImageElement;
+    const initialWidth = img.style.width;
+    const initialHeight = img.style.height;
+
+    const prevented = overlay.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, bubbles: true, cancelable: true }));
+
+    expect(prevented).toBe(false);
+    expect(previewImage.style.transform).toBe('translate(0px, 0px) scale(1.120)');
+    expect(img.style.width).toBe(initialWidth);
+    expect(img.style.height).toBe(initialHeight);
+  });
+
+  it('13.35 Image click zoom drag pans preview image without touching note image size', () => {
+    makeResizer({ viewMode: 'preview', overrides: { enableImageClickZoom: true } });
+    const { img } = setupViewWithImage();
+
+    img.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    const previewImage = document.querySelector('.image-converter-lightbox-image') as HTMLImageElement;
+    const initialWidth = img.style.width;
+    const initialHeight = img.style.height;
+
+    const preventedDown = previewImage.dispatchEvent(new MouseEvent('mousedown', {
+      button: 0,
+      clientX: 10,
+      clientY: 12,
+      bubbles: true,
+      cancelable: true
+    }));
+    document.dispatchEvent(new MouseEvent('mousemove', {
+      clientX: 35,
+      clientY: 42,
+      bubbles: true,
+      cancelable: true
+    }));
+    document.dispatchEvent(new MouseEvent('mouseup', {
+      clientX: 35,
+      clientY: 42,
+      bubbles: true,
+      cancelable: true
+    }));
+
+    expect(preventedDown).toBe(false);
+    expect(previewImage.style.transform).toBe('translate(25px, 30px) scale(1.000)');
+    expect(previewImage.classList.contains('image-converter-lightbox-image-dragging')).toBe(false);
+    expect(img.style.width).toBe(initialWidth);
+    expect(img.style.height).toBe(initialHeight);
+  });
+
+  it('13.36 Image click zoom disabled: given disabled setting, when clicking an image, then no preview opens', () => {
+    makeResizer({ viewMode: 'preview', overrides: { enableImageClickZoom: false } });
+    const { img } = setupViewWithImage();
+
+    const prevented = img.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+
+    expect(prevented).toBe(true);
+    expect(document.querySelector('.image-converter-lightbox-overlay')).toBeNull();
+  });
+
+  it('13.37 Image click zoom works when drag and scroll resize master switch is disabled', () => {
+    makeResizer({
+      viewMode: 'preview',
+      overrides: {
+        isImageResizeEnbaled: false,
+        enableImageClickZoom: true
+      }
+    });
+    const { img } = setupViewWithImage();
+
+    img.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+
+    expect(document.querySelector('.image-converter-lightbox-overlay')).toBeTruthy();
   });
 
   it('13.12 External image edge-resize: cursor changes near edges and uniform scaling on drag; markdown updated only if external link present (N/A in preview)', () => {

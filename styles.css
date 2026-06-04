@@ -2766,6 +2766,41 @@ button.image-converter-encoder-detected:hover,
 	outline: none !important;
 }
 
+/* ---------------------- IMAGE CLICK ZOOM ------------------------ */
+
+.image-converter-lightbox-open {
+	overflow: hidden;
+}
+
+.image-converter-lightbox-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 1000;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 32px;
+	background: rgba(0, 0, 0, 0.58);
+	cursor: zoom-out;
+	overscroll-behavior: contain;
+}
+
+.image-converter-lightbox-image {
+	max-width: min(92vw, 1600px);
+	max-height: 92vh;
+	object-fit: contain;
+	transform-origin: center center;
+	transition: transform 120ms ease-out;
+	cursor: grab;
+	user-select: none;
+	box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+
+.image-converter-lightbox-image-dragging {
+	cursor: grabbing;
+	transition: none;
+}
+
 /* ------------------------------------------------------------------- */
 /* ------------------------------------------------------------------- */
 

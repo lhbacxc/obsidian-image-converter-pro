@@ -157,7 +157,11 @@ export default class ImageConverterPlugin extends Plugin {
             });
 
             // Apply Image Alignment and Resizing when switching Live to Reading mode etc.
-            if (this.settings.isImageAlignmentEnabled || this.settings.isImageResizeEnbaled) {
+            if (
+                this.settings.isImageAlignmentEnabled ||
+                this.settings.isImageResizeEnbaled ||
+                this.settings.enableImageClickZoom
+            ) {
                 this.registerEvent(
                     this.app.workspace.on('layout-change', () => {
                         if (this.settings.isImageAlignmentEnabled) {
@@ -171,7 +175,7 @@ export default class ImageConverterPlugin extends Plugin {
                             }
                         }
 
-                        if (this.settings.isImageResizeEnbaled) {
+                        if (this.settings.isImageResizeEnbaled || this.settings.enableImageClickZoom) {
                             const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
                             if (activeView) {
                                 this.imageResizer?.onLayoutChange(activeView);
@@ -208,7 +212,7 @@ export default class ImageConverterPlugin extends Plugin {
         this.linkFormatter = new LinkFormatter(this.app);
         this.imageProcessor = new ImageProcessor(this.supportedImageFormats);
 
-        if (this.settings.isImageResizeEnbaled) {
+        if (this.settings.isImageResizeEnbaled || this.settings.enableImageClickZoom) {
             this.imageResizer = new ImageResizer(this);
             this.addChild(this.imageResizer);
             const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
