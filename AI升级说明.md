@@ -1,506 +1,278 @@
 # Obsidian Image Converter Pro AI 升级说明
 
-日期：2026-05-12
+最近更新：2026-08-18（同步上游 1.4.6 后重构）
 
 ## 文档目的
 
 这份文档是写给后续协助维护、升级、适配本插件源码仓库的 AI 的。
 
-目标不是让 AI 重新设计功能，也不是让 AI 依赖历史目录结构推断实现，而是让 AI：
+目标不是让 AI 重新设计功能，而是让 AI：
 
 - 直接基于当前源码仓库继续维护
-- 在上游更新后，识别并保留我们已经验证通过的自定义能力
+- 在上游更新后，**逐项识别并保留本 fork 全部 4 项自定义能力**（见"自定义能力总表"）
 - 优先根据当前源码、测试和构建结果完成适配
 - 尽量减少升级带来的回归问题
 
 ## 根目录约定
 
-从现在开始，`obsidian-image-converter-pro` 本身就是项目根目录。
+`obsidian-image-converter-pro` 本身就是项目根目录。本文档中所有路径均为相对项目根目录的相对路径；不要写死磁盘绝对路径。
 
-后续所有路径、命令、文件说明，都默认基于项目根目录展开：
+## 自定义能力总表（升级时逐项核对）
 
-- 不要假设仓库位于某个固定磁盘路径
-- 不要在文档、脚本说明、任务提示中写死绝对路径
-- 本文档中出现的文件路径，均为相对项目根目录的相对路径
+本 fork 相对上游共有 **4 项自定义能力**。升级后任何一项都不允许丢失。下面按"涉及文件 → 关键实现 → 测试 → 验证要点"归纳：
 
-例如：
+| # | 能力 | 涉及源码 | 相关测试 |
+|---|------|---------|---------|
+| 1 | 非图片附件右键菜单增强 | `src/ContextMenu.ts` | `tests/integration/ui/ContextMenu.test.ts` |
+| 2 | markdown 相对路径去掉 `./` | `src/LinkFormatter.ts` | `tests/unit/links/LinkFormatter.test.ts`、`LinkFormatSettings.mapping.test.ts` |
+| 3 | 图片点击放大预览（`enableImageClickZoom`） | `src/ImageResizer.ts`、`src/main.ts`、`src/ImageConverterSettings.ts`、`styles.css` | `tests/integration/ui/ImageResizer.test.ts` |
+| 4 | 命令面板插入附件触发重命名/压缩（create 兜底） | `src/main.ts` | `tests/integration/main/CreateHandler.test.ts` |
 
-- `src/ContextMenu.ts`
-- `src/FolderAndFilenameManagement.ts`
-- `tests/integration/ui/ContextMenu.test.ts`
+> 历史教训：早期文档主体只围绕能力 1 编写，导致升级时 AI 容易漏掉其他 3 项。**每次升级必须按本表逐项确认。**
 
-## 当前已落地并需持续保留的能力
+---
 
-当前自定义能力包括：
+## 能力详情与关键约束
 
-- 非图片附件右键菜单增强
-- 图片点击放大预览
-
-### 非图片附件右键菜单增强
+### 能力 1：非图片附件右键菜单增强
 
 目标行为：
 
-- 图片附件继续使用原有图片菜单逻辑
-- 非图片附件可被右键识别并显示附件菜单
-- 非图片附件菜单必须包含以下 5 项：
-  - `Name`
-  - `Copy file`
+- 图片附件继续走原有图片菜单逻辑，**不回归**
+- 非图片附件可被右键识别并显示附件菜单，必须包含以下 5 项：
+  - `Name`（重命名，保留原始扩展名）
+  - `Copy file`（仅 Windows 桌面，PowerShell `Set-Clipboard`）
   - `Show in navigation`
   - `Show in system explorer`
-  - `Delete file and link`
+  - `Delete file and link`（移除当前笔记链接 + 文件移入回收站）
+- 支持识别的非图片附件目标：`.file-embed`、`.file-embed-title`、`audio`、`video`、`iframe`
 
-当前支持识别的非图片附件目标包括：
+关键实现位置（`src/ContextMenu.ts`）：
 
-- `.file-embed`
-- `.file-embed-title`
-- `audio`
-- `video`
-- `iframe`
+- `handleContextMenuEvent`：**img/attachment 双分支**——`resolveImageFromTarget` 失败后走 `resolveAttachmentTarget`；img 分支保持无条件 `showAtMouseEvent`（与上游一致），attachment 分支在找不到文件时（`createAttachmentContextMenuItems` 返回 false）不显示
+- `resolveAttachmentTarget` / `getAttachmentFile`（路径解析）
+- `createAttachmentContextMenuItems` / `addAttachmentRenameInput` / `renameAttachmentFile`
+- `copyFileToSystemClipboard` / `showFileInNavigation` / `showFileInSystemExplorer` / `deleteAttachmentAndLinkFromNote`
 
-### 图片点击放大预览
+适配约束（1.4.6 后新增约定）：
+
+- 菜单输入 DOM 创建用 `ownerDocument`（popout 兼容）
+- 输入框事件监听用 **`menu.registerDomEvent`**（上游事件治理风格，注册在 transient Menu 上，随菜单隐藏自动清理），不要改回 `this.registerDomEvent` 挂长生命周期
+
+### 能力 2：markdown 相对路径去掉 `./`
+
+约束（`src/LinkFormatter.ts` 的 `formatRelativePath`，接收 `linkFormat` 参数区分分支）：
+
+1. `markdown + relative` 在子路径或同级路径下**不补 `./`**（输出 `附件/xxx.png`、`image.png`）
+2. `markdown + relative` 在父级路径下**必须保留 `../`**（输出 `../images/xxx.png`）
+3. `wikilink + relative` 逻辑不变，可保留显式 `./`
+4. 路径中的空格仍编码为 `%20`
+
+验证要点：同级不带 `./`、子目录不带 `./`、父目录保留 `../`、wikilink 原行为。
+
+### 能力 3：图片点击放大预览
 
 目标行为：
 
-- 笔记内图片支持左键点击放大预览
-- 点击放大后的遮罩空白区域可关闭预览并回到笔记
-- 放大预览中使用鼠标滚轮可继续放大或缩小图片
-- 放大预览中可按住鼠标左键拖动图片，查看被放大后的具体细节
-- 预览中的滚轮缩放和鼠标拖动只改变临时显示，不修改图片文件、不写回 markdown 链接尺寸、不写入对齐缓存
+- 左键点击笔记内图片打开 lightbox 放大预览
+- 点击遮罩空白区域关闭预览
+- 预览内滚轮缩放、左键拖动平移，**只改变临时显示**（`translate(...) scale(...)`）
+- 不修改图片文件、不写回 markdown 链接尺寸、不写入对齐缓存
 
-当前实现约束：
+实现约束：
 
-- 由独立设置项 `enableImageClickZoom` 控制，默认开启
-- 即使关闭拖拽/滚轮 resize 总开关，点击放大预览仍可独立工作
-- 跳过 Excalidraw 图片、`.map-view-main`、resize handle、编辑按钮和 lightbox 自身
-- 不处理非图片附件，避免影响附件菜单增强
-- 不修改 `src/ContextMenu.ts` 的右键菜单逻辑
-- lightbox 遮罩应保持半透明但不要过深，当前为 `rgba(0, 0, 0, 0.58)`
-- lightbox 内部拖动使用临时 `translate(...) scale(...)`，不得复用笔记内图片 resize 写回逻辑
+- 独立设置项 `enableImageClickZoom`，默认开启；**关闭 `isImageResizeEnbaled` 总开关后点击放大仍可独立工作**
+- `handleMouseWheel` 必须保留 `isImageResizeEnbaled` 总开关判断（避免只开点击放大时误触笔记内尺寸写回）
+- 跳过 Excalidraw 图片、`.map-view-main`、resize handle、编辑按钮、lightbox 自身，以及 **`.cm-table-widget`**（1.4.6 起：表格内图片保留 Obsidian 原生处理，见测试 13.29d）
+- 遮罩 `rgba(0, 0, 0, 0.58)`；lightbox 内部拖动不得复用笔记内 resize 写回逻辑
+- lightbox 相关 DOM/CSS 类：`.image-converter-lightbox-overlay`、`.image-converter-lightbox-image`、`.image-converter-lightbox-image-dragging`、`.image-converter-lightbox-open`
 
-当前 lightbox 相关 DOM/CSS 类：
+关键实现位置：
 
-- `.image-converter-lightbox-overlay`
-- `.image-converter-lightbox-image`
-- `.image-converter-lightbox-image-dragging`
-- `.image-converter-lightbox-open`
+- `src/ImageResizer.ts`：`getImageTargetForClickZoom`（入口过滤，含 `.cm-table-widget` 排除）、`openImageLightbox`、`closeImageLightbox`、`handleLightboxWheel`、`handleLightboxImageMouseDown/Move/Up`、`applyLightboxScale`、`handleMouseWheel`；lightbox 状态字段 12 个（`lightboxScale`/`lightboxPanX`/`lightboxPanY` 等）
+- `src/main.ts`：**3 处条件必须同时考虑 `isImageResizeEnbaled || enableImageClickZoom`**——`attachImageResizerToMarkdownView`、`attachImageResizerToActiveView`、`registerImageResizerWorkspaceEvents`，以及 `initializeComponents` 中 ImageResizer 的初始化
+- `src/ImageConverterSettings.ts`：接口字段 + `DEFAULT_SETTINGS.enableImageClickZoom: true` + 设置 UI。**UI 位置敏感**：必须放在 Drag & scroll resize section 头部（collapse 逻辑之后、`if (isImageResizeEnbaled)` 之前）；放在 "Disable Obsidian image selection" 与 "Cursor position" 之间会破坏上游测试的 DOM 相邻定位（`ImageConverterSettings.test.ts` 的 toggle 查找逻辑）
 
-## 关键源码位置
+验证要点：点击打开 / 空白关闭 / 滚轮缩放 / 拖动平移 / 不写回 / 关闭设置不打开 / 关闭 resize 总开关仍可放大 / **表格内图片不触发 lightbox**。
 
-如果 AI 需要理解、适配或迁移这些能力，优先查看以下文件。
+### 能力 4：命令面板插入附件 create 兜底
 
-### 右键菜单主入口
+背景：Obsidian「命令面板插入附件」走 `vault.createBinary()` 直接建文件，**不触发 `editor-drop`/`editor-paste`**，官方无 insert-attachment 事件，只能靠 `vault.on('create')` 兜底。
 
-- `src/ContextMenu.ts`
+实现（`src/main.ts`）：
 
-重点关注的方法：
+- `registerVaultCreateHandler`：注册常驻 `vault.on('create')`（桌面 + 移动都注册）
+- `handleFileCreated`：**四重过滤** → 共享管道处理 → 重命名/写回
+  1. 支持格式 + 非 neverProcess
+  2. `isSyncPath`（排除 git/syncthing/remotely-save 等同步工具路径）
+  3. `selfCreatedPaths`（排除插件自身 drop/paste 路径创建的 `createBinary`——**drop/paste 6 处 `createBinary` 调用前必须 `selfCreatedPaths.add(newFullPath)`**）
+  4. 链接证据：当前活动笔记是否引用该文件，**轮询等待**（每 150ms 一次、最长 3 秒）
+- `noteReferencesFile`：两级链接匹配——`getFirstLinkpathDest` 精确解析，失败降级为链接文本包含 basename/name（中文文件名可命中）
+- `getSelectedPresets`：从 drop/paste 抽取的共享预设选择（create 兜底独立调用；drop/paste 仍各自内联等价逻辑）
+- 写回：路径未变 → `modifyBinary`；路径变化 → **`fileManager.renameFile`（Obsidian 原生同步所有笔记引用）** + `modifyBinary`
+- `processingPaths` 防并发重复处理
 
-- `handleContextMenuEvent`
-- `resolveImageFromTarget`
-- `resolveAttachmentTarget`
-- `createAttachmentContextMenuItems`
-- `addAttachmentRenameInput`
-- `renameAttachmentFile`
-- `copyFileToSystemClipboard`
-- `showFileInNavigation`
-- `showFileInSystemExplorer`
-- `deleteAttachmentAndLinkFromNote`
+关键时序坑（实测踩过）：
 
-### 路径解析与安全重命名
+- `vault.on('create')` 触发时机**先于** Obsidian 插入链接，metadataCache 更新滞后 → 必须**轮询等待链接证据**，不要用固定延迟
+- 处理失败时保留原文件，不删除
 
-- `src/FolderAndFilenameManagement.ts`
+lint 注意事项：该方法组内 `setTimeout` 用 `window.setTimeout`；`.obsidian/plugins/...` 字符串需加 `eslint-disable obsidianmd/hardcoded-config-path`（同步工具路径是第三方固定路径，与 vault configDir 无关）。
 
-重点关注的方法：
+---
 
-- `getImagePath`
-- `sanitizeFilename`
-- `safeRenameFile`
+## 升级适配工作流程
 
-### 相关测试
-
-- `tests/integration/ui/ContextMenu.test.ts`
-
-说明：
-
-- 这里已经覆盖了附件菜单相关测试
-- 升级后如果行为变化，应优先修复源码，再按需要调整测试
-
-### 图片点击放大预览与图片交互
-
-- `src/ImageResizer.ts`
-- `src/ImageConverterSettings.ts`
-- `src/main.ts`
-- `styles.css`
-
-重点关注的方法和字段：
-
-- `ImageConverterSettings.enableImageClickZoom`
-- `DEFAULT_SETTINGS.enableImageClickZoom`
-- `ImageResizer.attachView`
-- `ImageResizer.getImageTargetForClickZoom`
-- `ImageResizer.handleImageClickCapture`
-- `ImageResizer.openImageLightbox`
-- `ImageResizer.closeImageLightbox`
-- `ImageResizer.handleLightboxWheel`
-- `ImageResizer.handleLightboxImageMouseDown`
-- `ImageResizer.handleLightboxImageMouseMove`
-- `ImageResizer.handleLightboxImageMouseUp`
-- `ImageResizer.applyLightboxScale`
-- `ImageResizer.handleMouseWheel`
-
-说明：
-
-- `ImageResizer` 现在不只负责拖拽/滚轮 resize，也负责图片点击放大预览
-- `src/main.ts` 中初始化 `ImageResizer` 的条件必须同时考虑 `isImageResizeEnbaled` 和 `enableImageClickZoom`
-- `handleMouseWheel` 必须保留 `isImageResizeEnbaled` 总开关判断，避免用户只启用点击放大时误触笔记内图片尺寸写回
-- lightbox 内部滚轮缩放和笔记内滚轮 resize 是两条不同路径，不要混在一起
-- lightbox 内部鼠标拖动只应更新预览图位移，不应触发笔记内 drag resize 或 markdown 链接尺寸更新
-
-### 图片点击放大预览相关测试
-
-- `tests/integration/ui/ImageResizer.test.ts`
-
-说明：
-
-- 已覆盖点击打开、点击空白关闭、预览滚轮缩放、预览左键拖动平移、设置关闭时不打开、关闭 resize 总开关时仍可点击放大
-- 升级后如果图片交互或 `ImageResizer` 生命周期变化，应同步运行并修复这些测试
-
-## AI 工作原则
-
-### 总原则
-
-不要从头重写功能。
-
-你要做的是：
-
-- 识别当前源码仓库中已经存在的附件菜单增强实现
-- 对比上游新版本是否已覆盖其中一部分
-- 只保留仍然必要的改动
-- 基于验证结果继续操作源码，而不是依赖历史背景猜实现
-
-换句话说，目标是“基于当前已验证实现做适配”，不是“重新发明一套功能”。
-
-### 源码优先
-
-长期维护必须优先修改源码文件，而不是把直接修改构建产物作为正式方案。
-
-如需定位功能，请优先查看：
-
-- `src/ContextMenu.ts`
-- `src/FolderAndFilenameManagement.ts`
-- `src/ImageResizer.ts`
-- `src/ImageConverterSettings.ts`
-- `tests/integration/ui/ContextMenu.test.ts`
-- `tests/integration/ui/ImageResizer.test.ts`
-
-## 推荐工作流程
-
-### 第一步：确认当前仓库状态
-
-先检查：
-
-- 当前分支
-- 本地是否有未提交改动
-- `origin` 和 `upstream` 配置
-
-推荐命令：
+### 第 0 步：确认状态 + 备份
 
 ```powershell
 git status --short --branch
 git remote -v
 git log --oneline --decorate -n 10
+git tag backup-pre-<上游版本>-merge HEAD   # 合并前打备份 tag，可随时回退
 ```
 
-### 第二步：确认上游最新版本
-
-如果已经配置了 `upstream`，先抓取上游最新代码。
-
-如果没有配置 `upstream`，先补充上游仓库地址，再抓取。
-
-推荐流程：
+### 第 1 步：抓取上游并对比
 
 ```powershell
-git remote add upstream https://github.com/xRyul/obsidian-image-converter.git
 git fetch upstream
 git branch -a
+git log --oneline 1.4.3..upstream/main          # 上游改了什么
+git diff --stat 1.4.3 upstream/main -- src/      # 涉及哪些文件
+git diff 1.4.3 HEAD -- src/                      # 本地自定义改了什么
 ```
 
-### 第三步：先对比当前源码里已经有什么
+### 第 2 步：三方文件分类（核心合并策略）
 
-升级前不要直接改文件。
+对每个文件判断归属，**不要直接 `git merge`**（两边都改的文件冲突面大，手动移植更可控）：
 
-先确认当前仓库里，附件菜单增强具体落在哪些源码和测试上，重点看：
+| 归属 | 处理方式 |
+|------|---------|
+| 仅上游改 | `git checkout upstream/main -- <file>` 直接取上游版 |
+| 仅本地改 | 保留本地版（上游未动，天然无冲突） |
+| 两边都改 | **以上游 1.4.6 结构为基底，手动移植本地功能** |
 
-- `src/ContextMenu.ts`
-- `src/FolderAndFilenameManagement.ts`
-- `tests/integration/ui/ContextMenu.test.ts`
+历史冲突面最大的文件（两边都改，需要手动合并）：`src/ContextMenu.ts`、`src/ImageResizer.ts`、`src/main.ts`、`src/ImageConverterSettings.ts`、`styles.css`、`tests/integration/ui/ContextMenu.test.ts`、`tests/integration/ui/ImageResizer.test.ts`。
 
-如果仓库里已经有对应 commit，优先查看 commit diff。
+### 第 3 步：逐能力适配
 
-如果没有 commit，则直接查看当前工作树改动。
+对「自定义能力总表」中每一项，按顺序执行：
 
-### 第四步：再对比上游新版结构
+1. 识别当前实现落在哪些方法/测试上（对照"能力详情"章节）
+2. 对比上游新版结构是否重构了这些方法
+3. 将仍然必要的实现移植到上游结构，**保持图片原有逻辑不变**
+4. 同步更新对应测试
 
-重点确认：
+适配时遵守的通用约束：
 
-- 上游 `src/ContextMenu.ts` 结构是否变化
-- 图片右键菜单逻辑是否重构
-- `src/FolderAndFilenameManagement.ts` 的路径解析与重命名逻辑是否变化
-- `tests/integration/ui/ContextMenu.test.ts` 的测试结构是否变化
+- 保持图片原有菜单/交互逻辑不回归
+- lightbox 滚轮缩放与拖动不得写回 markdown 尺寸、不得写入对齐缓存
+- create 兜底的四重过滤与 `selfCreatedPaths` 标记必须完整保留
+- 每项能力都有独立测试文件，行为变化先修源码，再按需调整测试，不要删测试
 
-如果上游已经新增了部分附件支持，先识别重叠部分，避免重复实现。
-
-### 第五步：做最小必要适配
-
-适配时遵守以下约束：
-
-- 保持图片原有逻辑不变
-- 只在需要的位置保留附件分支
-- 尽量复用现有路径解析和重命名逻辑
-- 非图片附件新增的 5 个动作必须保留
-- 图片点击放大预览必须保持独立设置开关，不要强制依赖拖拽/滚轮 resize 总开关
-- lightbox 预览滚轮缩放不得写回 markdown 链接尺寸
-- lightbox 预览鼠标拖动不得写回 markdown 链接尺寸，也不得写入对齐缓存
-- 测试必须同步验证
-
-### 第六步：验证
-
-适配后至少运行：
+### 第 4 步：验证
 
 ```powershell
+npm run build                                   # 必须通过
 npx vitest run tests/integration/ui/ContextMenu.test.ts
-npx vitest run tests/integration/ui/ImageResizer.test.ts tests/integration/ui/ContextMenu.test.ts
-npm run build
+npx vitest run tests/integration/ui/ImageResizer.test.ts
+npx vitest run tests/integration/main/CreateHandler.test.ts
+npx vitest run tests/unit/links/LinkFormatter.test.ts tests/unit/links/LinkFormatSettings.mapping.test.ts
+npx vitest run                                   # 全量，对照下方"已知基线"
+npm run lint                                     # 对照下方"已知基线"
+git diff --check
 ```
 
-如果改动范围较大，建议再运行：
+## 已知基线（2026-08-18，同步 1.4.6 后实测）
 
-```powershell
-npm test
-```
+升级验证时对照以下基线判断是否回归：
 
-## 当前已验证通过的命令
+- `npx vitest run`：**694 通过 / 5 失败**。5 个失败全部在 `tests/unit/pathing/FolderAndFilenameManagement.test.ts` 的 **app:// 资源 URL 测试**——`pathToFileURL` 在 Windows 上给 POSIX 路径加盘符（`app://hash/d:/...`），**上游 Linux CI 才通过，是 Windows 平台固有差异**，涉及文件均为上游原版。**不要为本地通过而改动上游 factories**
+- `npm run build`：成功（版本 1.4.6）
+- `npm run lint`：**21 个 error 为上游原版代码在 `eslint-plugin-obsidianmd` ^0.3.0 下的遗留**（上游 1.4.6 的 lint 修复本身不完整）。要求：**本次改动不新增 error**
 
-以下命令已经在当前仓库中验证通过，可作为后续工作的基线验证：
+判断回归的黄金法则：先确认失败的文件是上游原版还是本地合并代码——上游原版文件失败多为平台/上游问题，本地合并代码失败才是需要修的回归。
 
-```powershell
-npx vitest run tests/integration/ui/ContextMenu.test.ts
-npx vitest run tests/integration/ui/ImageResizer.test.ts tests/integration/ui/ContextMenu.test.ts
-npm test
-npm run build
-```
-
-这说明：
-
-- `ContextMenu` 相关测试已通过
-- `ImageResizer` 图片点击放大预览及旧图片缩放相关测试已通过
-- 全量测试已通过
-- 当前源码可以正常构建
-
-## 升级后必须确认的结果
-
-升级或适配完成后，必须确认以下事项仍然成立：
+## 升级后必须确认的结果（统一清单）
 
 1. 图片右键菜单仍正常工作
-2. 非图片附件仍可被右键识别
-3. 附件菜单仍保留以下 5 项：
-   - `Name`
-   - `Copy file`
-   - `Show in navigation`
-   - `Show in system explorer`
-   - `Delete file and link`
-4. 重命名时保留原始扩展名
-5. 删除附件时会移除当前笔记中的链接并将文件移入回收站
-6. 点击笔记内图片可以打开放大预览
-7. 点击放大预览的空白遮罩区域可以关闭预览
-8. 放大预览中鼠标滚轮可以临时放大/缩小图片
-9. 放大预览中鼠标左键拖动图片可以临时平移查看细节
-10. 放大预览缩放和拖动不会修改笔记中的图片尺寸链接
+2. 非图片附件仍可被右键识别，5 个动作齐全（Name / Copy file / Show in navigation / Show in system explorer / Delete file and link）
+3. 附件重命名保留原始扩展名
+4. 删除附件移除当前笔记链接并将文件移入回收站
+5. markdown 相对路径：同级/子目录不带 `./`，父目录保留 `../`
+6. wikilink 相对路径保持原行为
+7. 点击笔记内图片打开放大预览
+8. 点击空白遮罩关闭预览
+9. 预览内滚轮缩放、左键拖动平移
+10. 预览缩放和拖动不修改笔记中的图片尺寸链接
 11. 关闭 `enableImageClickZoom` 后点击图片不再打开预览
-12. `tests/integration/ui/ContextMenu.test.ts` 相关测试通过
-13. `tests/integration/ui/ImageResizer.test.ts` 相关测试通过
-14. 项目可以正常构建
-
-## AI 不应该做的事情
-
-请不要做这些事：
-
-- 不要脱离当前源码现状，凭历史印象重写功能
-- 不要在没有对比上游结构的情况下重写整个 `src/ContextMenu.ts`
-- 不要只为通过测试而移除附件功能
-- 不要无故删除现有测试
-- 不要修改与本次升级无关的大量模块
-- 不要在文档、说明或任务提示里继续依赖旧目录结构
-- 不要把图片点击放大预览实现成修改 markdown 尺寸的持久化缩放
-- 不要把 lightbox 预览拖动实现成笔记内图片尺寸拖拽
-- 不要让 lightbox 内部图片点击再次触发笔记图片点击逻辑
+12. 关闭 `isImageResizeEnbaled` 后点击放大仍可独立工作
+13. 表格内图片（`.cm-table-widget`）点击不触发 lightbox，保留 Obsidian 原生处理
+14. 命令面板插入附件仍触发重命名/压缩（create 兜底可用）
+15. 外部同步工具（git/syncthing/remotely-save）创建的文件不被误处理
+16. 相关测试文件全部通过（ContextMenu / ImageResizer / CreateHandler / LinkFormatter）
+17. 项目可以正常构建
 
 ## 发生冲突时的优先级
 
-优先级建议如下：
-
 1. 保证项目能正常构建
-2. 保证图片原有菜单不回归
+2. 保证图片原有菜单与交互不回归
 3. 保证附件菜单增强功能仍可用
-4. 保证图片点击放大预览不影响拖拽/滚轮 resize 的尺寸写回逻辑
-5. 保证相关测试通过
-6. 最后再考虑是否需要进一步重构
+4. 保证 lightbox 不影响拖拽/滚轮 resize 的尺寸写回逻辑
+5. 保证 create 兜底仍可用（命令面板插入附件被处理）
+6. 保证 markdown 相对路径规则不变
+7. 保证相关测试通过
+8. 最后再考虑是否需要进一步重构
 
-如果上游改动很大，不要机械套用旧改动。
-
-应先输出：
-
-- 哪些结构发生了变化
-- 哪些现有实现可以直接保留
-- 哪些逻辑需要重新适配
-- 哪些行为需要手动验证
+如果上游改动很大，先输出：哪些结构发生了变化 / 哪些实现可直接保留 / 哪些逻辑需要重新适配 / 哪些行为需要手动验证，再动手。
 
 ## 交付时应输出什么
 
-完成升级后，请输出：
-
 1. 修改了哪些源码文件
-2. 保留了哪些现有能力
+2. 保留了哪些现有能力（对照能力总表逐项说明）
 3. 哪些逻辑因为上游更新做了适配调整
 4. 跑了哪些测试或构建命令
 5. 还存在哪些残余风险
 
 ## 给 AI 的一句话任务模板
 
-可以直接使用下面这段作为升级任务提示：
-
 ```text
-请基于当前项目根目录中的源码仓库工作。
+请基于当前项目根目录中的源码仓库工作。目标不是从头重写功能，而是在上游更新的基础上，
+保留并适配本 fork 全部 4 项自定义能力（非图片附件右键菜单、markdown 相对路径去 ./、
+图片点击放大预览 enableImageClickZoom、命令面板插入附件 create 兜底）。
 
-目标不是从头重写功能，而是基于当前已经验证通过的实现，保留并适配“非图片附件右键菜单增强”能力。
-
-请按以下顺序执行：
-1. 检查当前 git 状态、分支、远程仓库
-2. 对比当前仓库与上游最新版
-3. 识别 `src/ContextMenu.ts`、`src/FolderAndFilenameManagement.ts`、`tests/integration/ui/ContextMenu.test.ts` 中与附件菜单增强相关的现有实现
-4. 将仍然必要的实现适配到上游最新源码结构中
-5. 保持图片原有逻辑不变
-6. 同步验证 `tests/integration/ui/ContextMenu.test.ts`
-7. 运行 `npx vitest run tests/integration/ui/ContextMenu.test.ts`
-8. 运行 `npm run build`
-9. 输出修改文件、验证结果、风险点
-
-不要依赖旧目录结构、历史 bundle 改法或绝对路径；优先依据当前源码与验证结果完成工作。
+请执行 `AI升级说明.md` 中的「升级适配工作流程」：先备份（git tag backup-pre-<版本>-merge），
+抓取上游并对比，按三方文件分类法合并（仅上游改→checkout 上游；仅本地改→保留；
+两边都改→以上游结构为基底手动移植本地功能），然后对「自定义能力总表」逐项核对并移植，
+最后运行第 4 步验证命令并对照「已知基线」判断是否回归。完成后按「交付时应输出什么」汇报。
 ```
 
-## 2026-05-12 变更记录：markdown 相对路径去掉 `./`
+---
 
-### 现象
+## 变更记录（简史，细节以 git commit 为准）
 
-当插件启用“markdown 形式的相对路径”插入附件时，当前实现会生成：
+| 日期 | 改动 | 涉及文件 | 验证 |
+|------|------|---------|------|
+| 2026-05-12 | markdown 相对路径去掉 `./` | `src/LinkFormatter.ts` + 2 个链接测试 | ContextMenu/ImageResizer 测试 + build |
+| 2026-06-04 | lightbox 支持拖动平移；遮罩改浅（0.86→0.58） | `src/ImageResizer.ts`、`styles.css`、`ImageResizer.test.ts` | ImageResizer 测试 + build |
+| 2026-08-18 | 命令面板插入附件 create 兜底（四重过滤 + 轮询链接证据） | `src/main.ts`、`tests/integration/main/CreateHandler.test.ts` | 全量 645 测试 + build |
+| 2026-08-18 | 同步上游 1.4.6：popout 支持 / Obsidian 1.13 交互恢复 / Windows MAX_PATH 安全 / 事件生命周期治理；4 项能力全部保留 | ContextMenu、ImageResizer、main、ImageConverterSettings、styles、manifest/package/versions 等 43 个文件 | 全量 694 过 / 5 失败（Windows app:// 平台差异）+ build 1.4.6 |
 
-```md
-![](./附件/【003】Obsidian_网页访问_202605121005.jpeg)
-```
+### 2026-08-18 同步 1.4.6 详情（本次合并要点备忘）
 
-但 Obsidian 默认插入同类附件时，路径通常为：
+上游 1.4.3 → 1.4.6 带来的新内容：
 
-```md
-![](附件/【003】Obsidian_网页访问_202605121005.jpeg)
-```
+- **popout 窗口支持**：`document` → `activeDocument`/`ownerDocument`，跨窗口 `instanceOf()`，ContextMenu 多 document 监听（`window-open`）
+- **Obsidian 1.13 图片交互恢复**：ImageResizer 生命周期重构为 workspace 事件驱动（`file-open`/`active-leaf-change` → attach/detach）、原生点击抑制、表格图片 widget 保留原生处理
+- **Windows 路径安全**：`FolderAndFilenameManagement.getWindowsPathLengthViolation()` + `main.ts validateAttachmentPath()`（MAX_PATH 260）
+- **事件生命周期治理**：ContextMenu 事件注册移到 transient Menu 上、`menu.onHide`、图片复制 `onload/onerror` 清理
+- **新测试**：ImageResizerLifecycle、WindowsPathLimit、ImageAlignment、NativeImageSelectionStyles 等
+- 依赖升级：`eslint-plugin-obsidianmd` ^0.1.9 → ^0.3.0
 
-两者差异仅在于前缀 `./`。
+本次合并中的适配调整（保持自定义能力的关键点）：
 
-### 本次调整
-
-- 修改 `src/LinkFormatter.ts`
-- 仅调整 `markdown + relative` 的输出规则
-- 当相对路径不需要使用 `../` 回退父目录时，不再强制补 `./`
-- 因此子路径和同级路径会输出为：
-  - `附件/xxx.png`
-  - `image.png`
-- 如果路径本来就需要回退父目录，仍然保持：
-  - `../images/xxx.png`
-
-### 明确保留的行为
-
-- `wikilink` 的相对路径逻辑不变，仍可保留显式 `./`
-- 绝对路径逻辑不变
-- markdown 路径中的空格仍继续编码为 `%20`
-- 本次不处理插入后文件重命名问题
-
-### 这次改动涉及的文件
-
-- `src/LinkFormatter.ts`
-- `tests/unit/links/LinkFormatter.test.ts`
-- `tests/unit/links/LinkFormatSettings.mapping.test.ts`
-
-### 升级时的注意事项
-
-以后如果上游再次修改链接生成逻辑，优先检查 `src/LinkFormatter.ts` 中的相对路径格式化分支，确认以下约束仍然成立：
-
-1. `wikilink + relative` 可以保留 `./`
-2. `markdown + relative` 在子路径或同级路径下不要补 `./`
-3. `markdown + relative` 在父级路径下必须继续保留 `../`
-
-### 本次新增/更新的验证点
-
-- markdown 相对路径指向同级文件时，不带 `./`
-- markdown 相对路径指向当前笔记下的子目录附件时，不带 `./`
-- markdown 相对路径指向父目录文件时，继续保留 `../`
-- wikilink 相对路径保持原行为
-
-## 2026-06-04 变更记录：图片点击放大预览支持拖动平移
-
-### 现象
-
-图片点击放大预览已经支持鼠标滚轮临时缩放，但放大后只能围绕中心查看，无法通过鼠标拖动移动预览图来查看图片局部细节。
-
-同时原 lightbox 遮罩颜色较深，背景被压暗过多。
-
-### 本次调整
-
-- 修改 `src/ImageResizer.ts`
-- 修改 `styles.css`
-- 更新 `tests/integration/ui/ImageResizer.test.ts`
-- lightbox 遮罩从 `rgba(0, 0, 0, 0.86)` 调整为 `rgba(0, 0, 0, 0.58)`
-- lightbox 预览图支持鼠标左键按住拖动平移
-- lightbox 预览图的临时显示状态统一使用 `translate(...) scale(...)`
-
-### 明确保留的行为
-
-- 点击笔记内图片仍通过 `enableImageClickZoom` 独立控制，默认开启
-- 关闭拖拽/滚轮 resize 总开关时，点击放大预览仍可独立工作
-- 点击 lightbox 空白遮罩区域仍可关闭预览
-- lightbox 内鼠标滚轮缩放仍只改变临时显示
-- lightbox 内鼠标左键拖动仍只改变临时显示
-- 预览缩放和拖动都不修改图片文件、不写回 markdown 链接尺寸、不写入对齐缓存
-- 笔记内图片滚轮 resize 仍必须受 `isImageResizeEnbaled` 总开关控制
-
-### 这次改动涉及的文件
-
-- `src/ImageResizer.ts`
-- `styles.css`
-- `tests/integration/ui/ImageResizer.test.ts`
-
-### 升级时的注意事项
-
-以后如果上游修改 `src/ImageResizer.ts` 的事件注册或 lightbox 结构，优先确认以下约束仍然成立：
-
-1. lightbox 内部滚轮缩放和笔记内滚轮 resize 是两条不同路径
-2. lightbox 内部鼠标拖动平移不触发笔记内 drag resize
-3. lightbox 临时 transform 包含位移和缩放，即 `translate(...) scale(...)`
-4. lightbox 内部交互不会写回 markdown 图片尺寸链接
-5. `.image-converter-lightbox-image-dragging` 仅表示预览图拖动状态
-
-### 本次新增/更新的验证点
-
-- 点击图片后可以打开 lightbox 预览
-- 点击 lightbox 空白遮罩区域可以关闭预览
-- lightbox 内滚轮缩放会更新预览图 `transform`
-- lightbox 内鼠标左键拖动会更新预览图 `transform`
-- lightbox 内滚轮缩放和拖动不会修改原笔记图片尺寸
-- 关闭 `enableImageClickZoom` 后点击图片不打开预览
-- 关闭 `isImageResizeEnbaled` 后点击放大预览仍可独立工作
-
-### 本次已验证命令
-
-```powershell
-npx vitest run tests/integration/ui/ImageResizer.test.ts
-npm run build
-git diff --check
-```
+- `src/main.ts`：上游 `activeDocument`/生命周期重构/`validateAttachmentPath` + 本地 create 兜底 + `selfCreatedPaths` 6 处标记 + `enableImageClickZoom` 条件 3 处
+- `src/ContextMenu.ts`：上游 popout/`menu.registerDomEvent` 结构 + 本地附件菜单（DOM 用 `ownerDocument`，监听用 `menu.registerDomEvent`；img 分支保持上游无条件 `showAtMouseEvent`，attachment 分支保留 hasItems 门控）
+- `src/ImageResizer.ts`：上游生命周期重构 + 本地 lightbox。**`getImageTargetForClickZoom` 必须排除 `.cm-table-widget`**（否则上游 13.29d 测试失败）
+- `src/ImageConverterSettings.ts`：`enableImageClickZoom` 设置 UI 放 section 头部（见能力 3 的位置敏感说明）
+- 版本：manifest/package `1.4.6`，品牌标识（Image Converter Pro / xRyul (lhbacxc)）不变
