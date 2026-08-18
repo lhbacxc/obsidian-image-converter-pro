@@ -76,6 +76,12 @@ export default class ImageConverterPlugin extends Plugin {
     private processedImage: ArrayBuffer | null = null;
     private temporaryBuffers: (ArrayBuffer | Blob | null)[] = [];
 
+    // 插件自身通过 createBinary 创建的文件路径集合，用于 vault.on('create') 过滤，
+    // 避免 drop/paste/create 路径自己建的文件被 create 监听二次处理。
+    private selfCreatedPaths: Set<string> = new Set();
+    // 正在处理中的文件路径集合，防止并发重复触发同一文件的 create 处理。
+    private processingPaths: Set<string> = new Set();
+
     private updateBodyStateClasses() {
         document.body.classList.toggle(
             'image-converter-disable-native-image-selection',
@@ -253,6 +259,9 @@ export default class ImageConverterPlugin extends Plugin {
 
         // Register PASTE/DROP events
         this.dropPasteRegisterEvents();
+
+        // Register vault.create fallback handler (desktop + mobile)
+        this.registerVaultCreateHandler();
 
         // Register file menu events
         this.registerEvent(
@@ -450,6 +459,184 @@ export default class ImageConverterPlugin extends Plugin {
         });
     }
 
+    /**
+     * 注册 vault.create 兜底监听（桌面 + 移动都注册）。
+     * 用于捕获命令面板「插入附件」等不会触发 editor-drop/editor-paste 的文件创建路径。
+     */
+    private registerVaultCreateHandler() {
+        this.registerEvent(
+            this.app.vault.on("create", async (file) => {
+                // vault.on('create') 回调参数为 TAbstractFile，过滤出 TFile 再处理
+                if (file instanceof TFile) {
+                    await this.handleFileCreated(file);
+                }
+            })
+        );
+    }
+
+    /**
+     * create 事件主入口：四重过滤 → 链接证据确认 → 共享管道处理 → 重命名/写回。
+     */
+    private async handleFileCreated(file: TFile) {
+        try {
+            // 过滤1：必须是支持的图片文件，且不在 neverProcess 模式中
+            if (!(file instanceof TFile)) return;
+            if (!this.supportedImageFormats.isSupported(undefined, file.name)) return;
+            if (this.folderAndFilenameManagement.matchesPatterns(file.name, this.settings.neverProcessFilenames)) return;
+
+            // 过滤2：排除同步工具（git/syncthing/remotely-save 等）创建的文件
+            if (this.isSyncPath(file.path)) return;
+
+            // 过滤3：排除插件自身 createBinary 创建的文件（drop/paste 路径已处理）
+            if (this.selfCreatedPaths.has(file.path)) {
+                this.selfCreatedPaths.delete(file.path);
+                return;
+            }
+
+            // 防并发：同一文件处理中则跳过
+            if (this.processingPaths.has(file.path)) return;
+            this.processingPaths.add(file.path);
+            try {
+                // 延迟等待 Obsidian 完成链接插入与 metadataCache 更新
+                await new Promise((resolve) => setTimeout(resolve, 300));
+
+                // 过滤4（链接证据）：当前活动笔记是否引用该文件？
+                // 只有"用户主动插入"才会在笔记中出现指向新文件的链接，
+                // 外部同步等场景不会有此链接，直接忽略。
+                const activeFile = this.app.workspace.getActiveFile();
+                if (!activeFile || activeFile.extension !== "md") return;
+                if (!this.noteReferencesFile(activeFile, file)) return;
+
+                // 交互：与拖拽行为一致（modalBehavior 弹窗/默认预设）
+                const {
+                    selectedConversionPreset,
+                    selectedFilenamePreset,
+                    selectedFolderPreset
+                } = await this.getSelectedPresets();
+
+                // 读二进制 → 构造 File 壳（determineDestination 依赖 File 的 name/type）
+                const fileBuffer = await this.app.vault.readBinary(file);
+                const originalSize = fileBuffer.byteLength;
+                const fileShell = new File([fileBuffer], file.name, {
+                    type: this.supportedImageFormats.getMimeTypeFromCache(file) ?? 'image/png'
+                });
+
+                // 共享管道：determineDestination 计算目标路径与文件名
+                let destinationPath: string;
+                let newFilename: string;
+                try {
+                    ({ destinationPath, newFilename } = await this.folderAndFilenameManagement.determineDestination(
+                        fileShell,
+                        activeFile,
+                        selectedConversionPreset,
+                        selectedFilenamePreset,
+                        selectedFolderPreset
+                    ));
+                } catch (error) {
+                    const errorMessage = error instanceof Error ? error.message : String(error);
+                    console.error("Error determining destination for created file:", errorMessage);
+                    new Notice(`Failed to determine destination for "${file.name}". Check console for details.`);
+                    return;
+                }
+
+                // 目标目录确保存在
+                try {
+                    await this.folderAndFilenameManagement.ensureFolderExists(destinationPath);
+                } catch (error) {
+                    const errorMessage = error instanceof Error ? error.message : String(error);
+                    if (!errorMessage.startsWith('Folder already exists')) {
+                        console.error("Error creating folder:", errorMessage);
+                        new Notice(`Failed to create folder "${destinationPath}". Check console for details.`);
+                        return;
+                    }
+                }
+
+                // 文件名冲突：increment 模式递增
+                if (selectedFilenamePreset?.conflictResolution === "increment") {
+                    newFilename = await this.folderAndFilenameManagement.handleNameConflicts(
+                        destinationPath,
+                        newFilename,
+                        "increment"
+                    );
+                }
+                const finalPath = this.folderAndFilenameManagement.combinePath(destinationPath, newFilename);
+
+                // 目标文件已存在且预设为 reuse → 跳过（Obsidian 已建文件并插链接，不重复处理）
+                const existingTarget = this.app.vault.getAbstractFileByPath(finalPath);
+                if (existingTarget && selectedFilenamePreset?.conflictResolution === "reuse") return;
+
+                // 压缩处理
+                this.processedImage = await this.imageProcessor.processImage(
+                    fileShell,
+                    selectedConversionPreset ? selectedConversionPreset.outputFormat : this.settings.outputFormat,
+                    selectedConversionPreset ? selectedConversionPreset.quality / 100 : this.settings.quality / 100,
+                    selectedConversionPreset ? selectedConversionPreset.colorDepth : this.settings.colorDepth,
+                    selectedConversionPreset ? selectedConversionPreset.resizeMode : this.settings.resizeMode,
+                    selectedConversionPreset ? selectedConversionPreset.desiredWidth : this.settings.desiredWidth,
+                    selectedConversionPreset ? selectedConversionPreset.desiredHeight : this.settings.desiredHeight,
+                    selectedConversionPreset ? selectedConversionPreset.desiredLongestEdge : this.settings.desiredLongestEdge,
+                    selectedConversionPreset ? selectedConversionPreset.enlargeOrReduce : this.settings.enlargeOrReduce,
+                    selectedConversionPreset ? selectedConversionPreset.allowLargerFiles : this.settings.allowLargerFiles,
+                    selectedConversionPreset,
+                    this.settings
+                );
+
+                if (finalPath === file.path) {
+                    // 路径未变：直接写回压缩内容（链接无需更新）
+                    await this.app.vault.modifyBinary(file, this.processedImage);
+                } else {
+                    // 路径变化：fileManager.renameFile 会自动更新所有笔记中的引用链接
+                    await this.app.fileManager.renameFile(file, finalPath);
+                    const renamedFile = this.app.vault.getAbstractFileByPath(finalPath);
+                    if (renamedFile instanceof TFile) {
+                        await this.app.vault.modifyBinary(renamedFile, this.processedImage);
+                    }
+                }
+                this.showSizeComparisonNotification(originalSize, this.processedImage.byteLength);
+            } finally {
+                this.processingPaths.delete(file.path);
+                this.clearMemory();
+            }
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            console.error("Failed to process created file:", errorMessage);
+            new Notice(`Failed to process inserted file "${file.name}". Check console for details.`);
+        }
+    }
+
+    /**
+     * 判断文件路径是否属于外部同步工具目录。
+     */
+    private isSyncPath(path: string): boolean {
+        const syncPatterns = [
+            '.sync-conflict',
+            '.git',
+            '.remote.',
+            '.sync/',
+            '.obsidian/plugins/remotely-save/',
+            '.obsidian/plugins/syncthing/',
+            'sync-index',
+            '.obsidian-git'
+        ];
+        return syncPatterns.some((pattern) => path.includes(pattern));
+    }
+
+    /**
+     * 检查活动笔记的 metadataCache 中是否出现指向该文件的链接（链接证据过滤）。
+     */
+    private noteReferencesFile(note: TFile, file: TFile): boolean {
+        const cache = this.app.metadataCache.getFileCache(note);
+        if (!cache) return false;
+        const candidates = [
+            ...(cache.links ?? []),
+            ...(cache.embeds ?? [])
+        ];
+        return candidates.some((link) => {
+            const dest = this.app.metadataCache.getFirstLinkpathDest(link.link, note.path);
+            return dest?.path === file.path;
+        });
+    }
+
     private dropPasteRegisterEvents() {
         // On mobile DROP events are not supported, but lets still check as a precaution
         if (Platform.isMobile) return;
@@ -524,6 +711,90 @@ export default class ImageConverterPlugin extends Plugin {
         );
     }
 
+    /**
+     * 根据 modalBehavior 设置选择转换/文件名/文件夹/链接格式/尺寸预设。
+     * drop、paste、create 三条路径共用。
+     */
+    private async getSelectedPresets(): Promise<{
+        selectedConversionPreset: ConversionPreset;
+        selectedFilenamePreset: FilenamePreset;
+        selectedFolderPreset: FolderPreset;
+        selectedLinkFormatPreset: LinkFormatPreset;
+        selectedResizePreset: NonDestructiveResizePreset;
+    }> {
+        // Check modal behavior setting
+        const { modalBehavior } = this.settings;
+        let showModal = modalBehavior === "always";
+
+        if (modalBehavior === "ask") {
+            showModal = await new Promise<boolean>((resolve) => {
+                new ConfirmDialog(
+                    this.app,
+                    "Show Preset Selection Modal?",
+                    "Do you want to select presets for this image?",
+                    "Yes",
+                    () => resolve(true)
+                ).open();
+            });
+        }
+
+        if (showModal) {
+            // Show the modal and wait for user selection
+            return await new Promise<{
+                selectedConversionPreset: ConversionPreset;
+                selectedFilenamePreset: FilenamePreset;
+                selectedFolderPreset: FolderPreset;
+                selectedLinkFormatPreset: LinkFormatPreset;
+                selectedResizePreset: NonDestructiveResizePreset;
+            }>((resolve) => {
+                new PresetSelectionModal(
+                    this.app,
+                    this.settings,
+                    (conversionPreset, filenamePreset, folderPreset, linkFormatPreset, resizePreset) => {
+                        resolve({
+                            selectedConversionPreset: conversionPreset,
+                            selectedFilenamePreset: filenamePreset,
+                            selectedFolderPreset: folderPreset,
+                            selectedLinkFormatPreset: linkFormatPreset,
+                            selectedResizePreset: resizePreset,
+                        });
+                    },
+                    this,
+                    this.variableProcessor
+                ).open();
+            });
+        }
+
+        // Use default presets from settings using the generic getter
+        return {
+            selectedConversionPreset: this.getPresetByName(
+                this.settings.selectedConversionPreset,
+                this.settings.conversionPresets,
+                'Conversion'
+            ),
+            selectedFilenamePreset: this.getPresetByName(
+                this.settings.selectedFilenamePreset,
+                this.settings.filenamePresets,
+                'Filename'
+            ),
+            selectedFolderPreset: this.getPresetByName(
+                this.settings.selectedFolderPreset,
+                this.settings.folderPresets,
+                'Folder'
+            ),
+            selectedLinkFormatPreset: this.getPresetByName(
+                this.settings.linkFormatSettings.selectedLinkFormatPreset,
+                this.settings.linkFormatSettings.linkFormatPresets,
+                'Link Format'
+            ),
+            selectedResizePreset: this.getPresetByName(
+                this.settings.nonDestructiveResizeSettings.selectedResizePreset,
+                this.settings.nonDestructiveResizeSettings.resizePresets,
+                'Resize'
+            )
+        };
+    }
+
     private async handleDrop(fileData: { name: string; type: string; file: File }[], editor: Editor, evt: DragEvent, cursor: EditorPosition) {
 
         // Step 1: Filter Supported Files
@@ -550,91 +821,14 @@ export default class ImageConverterPlugin extends Plugin {
         // - This allows for sequential processing, avoiding concurrency issues.
         const filePromises = supportedFiles.map(async (file) => {
             try {
-                // Check modal behavior setting
-                const { modalBehavior } = this.settings;
-                let showModal = modalBehavior === "always";
-
-                if (modalBehavior === "ask") {
-                    showModal = await new Promise<boolean>((resolve) => {
-                        new ConfirmDialog(
-                            this.app,
-                            "Show Preset Selection Modal?",
-                            "Do you want to select presets for this image?",
-                            "Yes",
-                            () => resolve(true)
-                        ).open();
-                    });
-                }
-
-                let selectedConversionPreset: ConversionPreset;
-                let selectedFilenamePreset: FilenamePreset;
-                let selectedFolderPreset: FolderPreset;
-                let selectedLinkFormatPreset: LinkFormatPreset;
-                let selectedResizePreset: NonDestructiveResizePreset;
-
-                if (showModal) {
-                    // Show the modal and wait for user selection
-                    ({
-                        selectedConversionPreset,
-                        selectedFilenamePreset,
-                        selectedFolderPreset,
-                        selectedLinkFormatPreset,
-                        selectedResizePreset
-                    } = await new Promise<{
-                        selectedConversionPreset: ConversionPreset;
-                        selectedFilenamePreset: FilenamePreset;
-                        selectedFolderPreset: FolderPreset;
-                        selectedLinkFormatPreset: LinkFormatPreset;
-                        selectedResizePreset: NonDestructiveResizePreset;
-                    }>((resolve) => {
-                        new PresetSelectionModal(
-                            this.app,
-                            this.settings,
-                            (conversionPreset, filenamePreset, folderPreset, linkFormatPreset, resizePreset) => {
-                                resolve({
-                                    selectedConversionPreset: conversionPreset,
-                                    selectedFilenamePreset: filenamePreset,
-                                    selectedFolderPreset: folderPreset,
-                                    selectedLinkFormatPreset: linkFormatPreset,
-                                    selectedResizePreset: resizePreset,
-                                });
-                            },
-                            this,
-                            this.variableProcessor
-                        ).open();
-                    }));
-                } else {
-                    // Use default presets from settings using the generic getter
-                    selectedConversionPreset = this.getPresetByName(
-                        this.settings.selectedConversionPreset,
-                        this.settings.conversionPresets,
-                        'Conversion'
-                    );
-
-                    selectedFilenamePreset = this.getPresetByName(
-                        this.settings.selectedFilenamePreset,
-                        this.settings.filenamePresets,
-                        'Filename'
-                    );
-
-                    selectedFolderPreset = this.getPresetByName(
-                        this.settings.selectedFolderPreset,
-                        this.settings.folderPresets,
-                        'Folder'
-                    );
-
-                    selectedLinkFormatPreset = this.getPresetByName(
-                        this.settings.linkFormatSettings.selectedLinkFormatPreset,
-                        this.settings.linkFormatSettings.linkFormatPresets,
-                        'Link Format'
-                    );
-
-                    selectedResizePreset = this.getPresetByName(
-                        this.settings.nonDestructiveResizeSettings.selectedResizePreset,
-                        this.settings.nonDestructiveResizeSettings.resizePresets,
-                        'Resize'
-                    );
-                }
+                // Step 3.1: Select presets (shared with paste/create paths)
+                const {
+                    selectedConversionPreset,
+                    selectedFilenamePreset,
+                    selectedFolderPreset,
+                    selectedLinkFormatPreset,
+                    selectedResizePreset
+                } = await this.getSelectedPresets();
 
                 // Step 3.2: Determine Destination and Filename
                 // - Use the `determineDestination` function to calculate the destination path and new filename for the current file.
@@ -733,6 +927,7 @@ export default class ImageConverterPlugin extends Plugin {
                         // const originalSize = file.size;
                         const fileBuffer = await file.arrayBuffer();
                         // Vault.createBinary returns a TFile or throws on failure (no null result).
+                        this.selfCreatedPaths.add(newFullPath);
                         const tfile = await this.app.vault.createBinary(newFullPath, fileBuffer);
 
                         // Insert a link to the newly created (but unprocessed) file.
@@ -802,10 +997,12 @@ export default class ImageConverterPlugin extends Plugin {
                                 new Notice(`Using original image for "${file.name}" because size reduction was less than ${minSavingsKB} KB.`);
 
                                 const fileBuffer = await file.arrayBuffer();
+                                this.selfCreatedPaths.add(newFullPath);
                                 tfile = await this.app.vault.createBinary(newFullPath, fileBuffer);
                             } else {
                                 // Processed image is smaller OR user doesn't want to revert
                                 this.showSizeComparisonNotification(originalSize, this.processedImage.byteLength);
+                                this.selfCreatedPaths.add(newFullPath);
                                 tfile = await this.app.vault.createBinary(newFullPath, this.processedImage);
                             }
 
@@ -893,91 +1090,15 @@ export default class ImageConverterPlugin extends Plugin {
         // Step 3: Map Files to Processing Promises
         // - Create an array of promises, each responsible for processing one pasted file.
         const filePromises = supportedFiles.map(async (file) => {
-            // Check modal behavior setting
-            const { modalBehavior } = this.settings;
-            let showModal = modalBehavior === "always";
+            // Step 3.1: Select presets (shared with drop/create paths)
+            const {
+                selectedConversionPreset,
+                selectedFilenamePreset,
+                selectedFolderPreset,
+                selectedLinkFormatPreset,
+                selectedResizePreset
+            } = await this.getSelectedPresets();
 
-            if (modalBehavior === "ask") {
-                showModal = await new Promise<boolean>((resolve) => {
-                    new ConfirmDialog(
-                        this.app,
-                        "Show Preset Selection Modal?",
-                        "Do you want to select presets for this image?",
-                        "Yes",
-                        () => resolve(true)
-                    ).open();
-                });
-            }
-
-            let selectedConversionPreset: ConversionPreset;
-            let selectedFilenamePreset: FilenamePreset;
-            let selectedFolderPreset: FolderPreset;
-            let selectedLinkFormatPreset: LinkFormatPreset;
-            let selectedResizePreset: NonDestructiveResizePreset;
-
-            if (showModal) {
-                // Show the modal and wait for user selection
-                ({
-                    selectedConversionPreset,
-                    selectedFilenamePreset,
-                    selectedFolderPreset,
-                    selectedLinkFormatPreset,
-                    selectedResizePreset
-                } = await new Promise<{
-                    selectedConversionPreset: ConversionPreset;
-                    selectedFilenamePreset: FilenamePreset;
-                    selectedFolderPreset: FolderPreset;
-                    selectedLinkFormatPreset: LinkFormatPreset;
-                    selectedResizePreset: NonDestructiveResizePreset;
-                }>((resolve) => {
-                    new PresetSelectionModal(
-                        this.app,
-                        this.settings,
-                        (conversionPreset, filenamePreset, folderPreset, linkFormatPreset, resizePreset) => {
-                            resolve({
-                                selectedConversionPreset: conversionPreset,
-                                selectedFilenamePreset: filenamePreset,
-                                selectedFolderPreset: folderPreset,
-                                selectedLinkFormatPreset: linkFormatPreset,
-                                selectedResizePreset: resizePreset,
-                            });
-                        },
-                        this,
-                        this.variableProcessor
-                    ).open();
-                }));
-            } else {
-                // Use default presets from settings using the generic getter
-                selectedConversionPreset = this.getPresetByName(
-                    this.settings.selectedConversionPreset,
-                    this.settings.conversionPresets,
-                    'Conversion'
-                );
-
-                selectedFilenamePreset = this.getPresetByName(
-                    this.settings.selectedFilenamePreset,
-                    this.settings.filenamePresets,
-                    'Filename'
-                );
-
-                selectedFolderPreset = this.getPresetByName(
-                    this.settings.selectedFolderPreset,
-                    this.settings.folderPresets,
-                    'Folder'
-                );
-
-                selectedLinkFormatPreset = this.getPresetByName(
-                    this.settings.linkFormatSettings.selectedLinkFormatPreset,
-                    this.settings.linkFormatSettings.linkFormatPresets,
-                    'Link Format'
-                );
-
-                selectedResizePreset = this.getPresetByName(
-                    this.settings.nonDestructiveResizeSettings.selectedResizePreset,
-                    this.settings.nonDestructiveResizeSettings.resizePresets,
-                    'Resize'
-                );
-            }
             // Step 3.2: Determine Destination and Filename
             // - Calculate the destination path and new filename for the current file.
             try {
@@ -1077,6 +1198,7 @@ export default class ImageConverterPlugin extends Plugin {
                         // const originalSize = file.size;
                         const fileBuffer = await file.arrayBuffer();
                         // Vault.createBinary returns a TFile or throws on failure (no null result).
+                        this.selfCreatedPaths.add(newFullPath);
                         const tfile = await this.app.vault.createBinary(newFullPath, fileBuffer);
 
                         // Insert a link to the newly created (unprocessed) file.
@@ -1143,10 +1265,12 @@ export default class ImageConverterPlugin extends Plugin {
                                 new Notice(`Using original image for "${file.name}" because size reduction was less than ${minSavingsKB} KB.`);
 
                                 const fileBuffer = await file.arrayBuffer();
+                                this.selfCreatedPaths.add(newFullPath);
                                 tfile = await this.app.vault.createBinary(newFullPath, fileBuffer);
                             } else {
                                 // Processed image is smaller OR user doesn't want to revert
                                 this.showSizeComparisonNotification(originalSize, this.processedImage.byteLength);
+                                this.selfCreatedPaths.add(newFullPath);
                                 tfile = await this.app.vault.createBinary(newFullPath, this.processedImage);
                             }
 
