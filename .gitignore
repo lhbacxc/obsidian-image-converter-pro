@@ -28,3 +28,9 @@ data.json
 coverage/
 *.lcov
 .vscode-test/
+
+# WorkBuddy local tool data (memory, mcp, etc.)
+.workbuddy/
+
+# CodeGraph local index
+.codegraph/
