@@ -1,5 +1,5 @@
 // FolderAndFilenameManagement.ts
-import { TFile, TFolder, App, normalizePath, Notice, FileSystemAdapter } from "obsidian";
+import { TFile, TFolder, App, normalizePath, Notice, FileSystemAdapter, Platform } from "obsidian";
 // eslint-disable-next-line import/no-nodejs-modules -- Required for path manipulation; Obsidian runs on Electron with Node.js support
 import * as path from 'path';
 import {
@@ -11,6 +11,8 @@ import {
 import { VariableProcessor, VariableContext } from "./VariableProcessor";
 import { SupportedImageFormats } from "./SupportedImageFormats";
 import { getVaultConfigString } from "./utils/vaultConfig";
+
+const WINDOWS_MAX_PATH = 260;
 
 export class FolderAndFilenameManagement {
     constructor(
@@ -184,6 +186,47 @@ export class FolderAndFilenameManagement {
             return normalizePath(`/${filename}`);
         }
         return normalizePath(`${basePath}/${filename}`);
+    }
+
+    /**
+     * Returns the conventional absolute path when a target reaches Windows MAX_PATH.
+     * The extended-length namespace prefix is excluded because it is not part of the
+     * underlying drive or UNC path evaluated against the legacy safety limit.
+     */
+    getWindowsPathLengthViolation(vaultRelativePath: string): {
+        absolutePath: string;
+        length: number;
+        limit: number;
+    } | null {
+        if (!Platform.isWin || !(this.app.vault.adapter instanceof FileSystemAdapter)) {
+            return null;
+        }
+
+        let basePath = this.app.vault.adapter.getBasePath().replace(/\//g, "\\");
+        const extendedUncPrefix = "\\\\?\\UNC\\";
+        const extendedPathPrefix = "\\\\?\\";
+
+        if (basePath.startsWith(extendedUncPrefix)) {
+            basePath = `\\\\${basePath.substring(extendedUncPrefix.length)}`;
+        } else if (basePath.startsWith(extendedPathPrefix)) {
+            basePath = basePath.substring(extendedPathPrefix.length);
+        }
+
+        basePath = basePath.replace(/\\+$/, "");
+        const relativePath = normalizePath(vaultRelativePath)
+            .replace(/^\/+/, "")
+            .replace(/\//g, "\\");
+        const absolutePath = relativePath ? `${basePath}\\${relativePath}` : basePath;
+
+        if (absolutePath.length < WINDOWS_MAX_PATH) {
+            return null;
+        }
+
+        return {
+            absolutePath,
+            length: absolutePath.length,
+            limit: WINDOWS_MAX_PATH,
+        };
     }
 
     /**

@@ -1,3 +1,38 @@
+/* ---------------------- IMAGE CLICK ZOOM ------------------------ */
+
+.image-converter-lightbox-open {
+	overflow: hidden;
+}
+
+.image-converter-lightbox-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 1000;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 32px;
+	background: rgba(0, 0, 0, 0.58);
+	cursor: zoom-out;
+	overscroll-behavior: contain;
+}
+
+.image-converter-lightbox-image {
+	max-width: min(92vw, 1600px);
+	max-height: 92vh;
+	object-fit: contain;
+	transform-origin: center center;
+	transition: transform 120ms ease-out;
+	cursor: grab;
+	user-select: none;
+	box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+
+.image-converter-lightbox-image-dragging {
+	cursor: grabbing;
+	transition: none;
+}
+
 /* go beyond the line width */
 /* .markdown-reading-view img,
 .markdown-source-view img,
@@ -36,6 +71,33 @@ body.image-converter-disable-native-image-selection:not(.is-mobile)
 	.internal-embed.image-embed:focus-within
 	.edit-block-button {
 	opacity: 0 !important;
+	pointer-events: none !important;
+}
+
+/* Obsidian 1.13 moved image controls into an always-present toolbar that is
+ * revealed on hover. Hide the whole native toolbar so it cannot overlap the
+ * plugin's resize handles or receive pointer input.
+ */
+body.image-converter-disable-native-image-selection:not(.is-mobile)
+	.markdown-source-view
+	.image-embed
+	.embed-actions,
+body.image-converter-disable-native-image-selection:not(.is-mobile)
+	.markdown-source-view
+	.internal-embed.image-embed
+	.embed-actions {
+	display: none !important;
+	pointer-events: none !important;
+}
+
+/* The native image-reveal tooltip is absolutely positioned and escapes Obsidian's
+ * fixed-height table row. The Markdown link is the useful part of edit mode here.
+ */
+body.image-converter-disable-native-image-selection:not(.is-mobile)
+	.markdown-source-view
+	.cm-table-widget
+	.cm-image-reveal-tooltip {
+	display: none !important;
 	pointer-events: none !important;
 }
 
@@ -1506,6 +1568,11 @@ button.image-converter-encoder-detected:hover,
 	overflow: hidden;
 }
 
+.image-converter-annotation-tool-image-annotation-modal .image-converter-annotation-tool-modal-content {
+	padding: 0;
+	overflow: hidden;
+}
+
 .image-converter-annotation-tool-image-annotation-modal
 	.image-converter-annotation-tool-modal-container {
 	background-color: var(--background-primary);
@@ -2764,41 +2831,6 @@ button.image-converter-encoder-detected:hover,
 
 .map-view-main .image-resize-border {
 	outline: none !important;
-}
-
-/* ---------------------- IMAGE CLICK ZOOM ------------------------ */
-
-.image-converter-lightbox-open {
-	overflow: hidden;
-}
-
-.image-converter-lightbox-overlay {
-	position: fixed;
-	inset: 0;
-	z-index: 1000;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	padding: 32px;
-	background: rgba(0, 0, 0, 0.58);
-	cursor: zoom-out;
-	overscroll-behavior: contain;
-}
-
-.image-converter-lightbox-image {
-	max-width: min(92vw, 1600px);
-	max-height: 92vh;
-	object-fit: contain;
-	transform-origin: center center;
-	transition: transform 120ms ease-out;
-	cursor: grab;
-	user-select: none;
-	box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
-}
-
-.image-converter-lightbox-image-dragging {
-	cursor: grabbing;
-	transition: none;
 }
 
 /* ------------------------------------------------------------------- */

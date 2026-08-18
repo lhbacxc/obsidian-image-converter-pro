@@ -102,15 +102,33 @@ beforeEach(async () => {
       expect(spy).toHaveBeenCalledWith('contextmenu', expect.any(Function), true);
       (ctx as any).onunload?.();
     });
+
+    it('registers context menu listeners for popout documents when a workspace window opens', () => {
+      let onWindowOpen: ((workspaceWindow: unknown, win: { document: Document }) => void) | undefined;
+      (app.workspace.on as any) = vi.fn((eventName: string, callback: any) => {
+        if (eventName === 'window-open') onWindowOpen = callback;
+        return { eventName, callback };
+      });
+
+      const ctx = new contextMenuCls(app as any, plugin, {} as any, {} as any);
+      const popoutDocument = document.implementation.createHTMLDocument('popout');
+      const addSpy = vi.spyOn(popoutDocument, 'addEventListener');
+
+      onWindowOpen?.({} as any, { document: popoutDocument });
+
+      expect(addSpy).toHaveBeenCalledWith('pointerdown', expect.any(Function), true);
+      expect(addSpy).toHaveBeenCalledWith('mousedown', expect.any(Function), true);
+      expect(addSpy).toHaveBeenCalledWith('contextmenu', expect.any(Function), true);
+      expect(addSpy).toHaveBeenCalledWith('click', expect.any(Function), undefined);
+      (ctx as any).onunload?.();
+    });
   });
 
   describe('14.2 Visibility and scope', () => {
     it('shows menu on images in markdown views only', () => {
       const showSpy = vi.spyOn((Menu as any).prototype, 'showAtMouseEvent');
       const img = setupImg('markdown-preview-view');
-      const note = fakeTFile({ path: 'n1.md', name: 'n1.md', extension: 'md' });
-      (app.workspace.getActiveFile as any) = vi.fn(() => note);
-      (app.workspace.getActiveViewOfType as any) = vi.fn(() => ({ getViewType: () => 'markdown', file: note }));
+      (app.workspace.getActiveViewOfType as any) = vi.fn(() => ({ getViewType: () => 'markdown' }));
 const ctx = new contextMenuCls(app as any, plugin, { getImagePath: () => null } as any, {} as any);
 
       img.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
@@ -125,12 +143,33 @@ const ctx = new contextMenuCls(app as any, plugin, { getImagePath: () => null } 
       (ctx as any).onunload?.();
     });
 
+    it('hides the previous image context menu before opening a replacement', () => {
+      const showSpy = vi
+        .spyOn((Menu as any).prototype, 'showAtMouseEvent')
+        .mockImplementation(function (this: any) { return this; });
+      const hideSpy = vi.spyOn((Menu as any).prototype, 'hide');
+      const img = setupImg('markdown-preview-view');
+      (app.workspace.getActiveViewOfType as any) = vi.fn(() => ({ getViewType: () => 'markdown' }));
+      (app.workspace.getActiveFile as any) = vi.fn(() => fakeTFile({ path: 'n1.md', name: 'n1.md', extension: 'md' }));
+      const ctx = new contextMenuCls(app as any, plugin, { getImagePath: () => null } as any, {} as any);
+
+      try {
+        img.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+        img.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+        expect(showSpy).toHaveBeenCalledTimes(2);
+        expect(hideSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        (ctx as any).onunload?.();
+        showSpy.mockRestore();
+        hideSpy.mockRestore();
+      }
+    });
+
     it('suppresses native image focus on right mouse down and clears image embed focus before opening the custom context menu when click override is enabled', () => {
       const showSpy = vi.spyOn((Menu as any).prototype, 'showAtMouseEvent');
       plugin.settings.disableObsidianImageSelectionOnClick = true;
-      const note = fakeTFile({ path: 'n1.md', name: 'n1.md', extension: 'md' });
-      (app.workspace.getActiveFile as any) = vi.fn(() => note);
-      (app.workspace.getActiveViewOfType as any) = vi.fn(() => ({ getViewType: () => 'markdown', file: note }));
+      (app.workspace.getActiveViewOfType as any) = vi.fn(() => ({ getViewType: () => 'markdown' }));
       const { corner, embed } = setupLivePreviewImage();
       const blurSpy = vi.spyOn(embed, 'blur');
 
@@ -283,6 +322,9 @@ expect(modalSpy).toHaveBeenCalled();
           cb(item);
           menuItems.push(item);
           return this;
+        },
+        registerDomEvent(el: HTMLElement, event: string, handler: EventListener) {
+          el.addEventListener(event, handler);
         }
       } as any;
 
@@ -305,6 +347,9 @@ expect(modalSpy).toHaveBeenCalled();
           cb(item);
           menuItems.push(item);
           return this;
+        },
+        registerDomEvent(el: HTMLElement, event: string, handler: EventListener) {
+          el.addEventListener(event, handler);
         }
       } as any;
 
@@ -406,7 +451,8 @@ describe('Attachment context menu integration', () => {
         cb(item);
         return this;
       },
-      addSeparator() { return this; }
+      addSeparator() { return this; },
+      registerDomEvent() { return this; }
     } as any;
 
     const attachmentTarget = {

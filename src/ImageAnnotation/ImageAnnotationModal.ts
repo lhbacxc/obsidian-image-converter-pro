@@ -105,7 +105,7 @@ export class ImageAnnotationModal extends Modal {
 
     onOpen(): void {
         const { contentEl } = this;
-        contentEl.setCssProps({ 'padding': '0', 'overflow': 'hidden' });
+        contentEl.addClass('image-converter-annotation-tool-modal-content');
 
         const modalContainer = contentEl.createDiv('image-converter-annotation-tool-modal-container');
 
@@ -619,16 +619,18 @@ export class ImageAnnotationModal extends Modal {
         });
 
         // Keyboard handlers
-        this.componentContainer.registerDomEvent(document, 'keydown', this.boundKeyDownHandler);
-        this.componentContainer.registerDomEvent(document, 'keyup', this.boundKeyUpHandler);
+        const modalDocument = this.modalEl.doc ?? this.modalEl.ownerDocument;
+        this.componentContainer.registerDomEvent(modalDocument, 'keydown', this.boundKeyDownHandler);
+        this.componentContainer.registerDomEvent(modalDocument, 'keyup', this.boundKeyUpHandler);
 
         // Periodic state check
-        setInterval(() => {
+        const textEditingInterval = window.setInterval(() => {
             const activeObject = this.canvas?.getActiveObject();
             if (activeObject instanceof IText && !activeObject.isEditing && this.isTextEditingBlocked) {
                 this.isTextEditingBlocked = false;
             }
         }, 5000);
+        this.componentContainer.register(() => window.clearInterval(textEditingInterval));
     }
 
     private preventDefaultHandlers(): void {
@@ -792,7 +794,7 @@ export class ImageAnnotationModal extends Modal {
             this.canvas?.setActiveObject(text);
             this.canvas?.requestRenderAll();
 
-            setTimeout(() => {
+            window.setTimeout(() => {
                 text.enterEditing();
                 text.selectAll();
                 this.canvas?.requestRenderAll();

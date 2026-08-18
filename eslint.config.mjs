@@ -81,6 +81,7 @@ export default defineConfig([
 			globals: {
 				...globals.node,
 				...globals.browser,
+				activeDocument: "readonly",
 				console: "readonly",
 				process: "readonly",
 				Buffer: "readonly",

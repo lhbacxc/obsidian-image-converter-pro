@@ -40,36 +40,36 @@ import {
 import { PresetSelectionModal } from "./PresetSelectionModal";
 
 export default class ImageConverterPlugin extends Plugin {
-    settings: ImageConverterSettings;
+    settings!: ImageConverterSettings;
 
     // Check supported image formats
-    supportedImageFormats: SupportedImageFormats;
+    supportedImageFormats!: SupportedImageFormats;
     // Handle image management
-    folderAndFilenameManagement: FolderAndFilenameManagement;
+    folderAndFilenameManagement!: FolderAndFilenameManagement;
     // Handle image processing
-    imageProcessor: ImageProcessor;
+    imageProcessor!: ImageProcessor;
     // Handle variable processing
-    variableProcessor: VariableProcessor;
+    variableProcessor!: VariableProcessor;
     // linkFormatSettings: LinkFormatSettings;     // Link format - it is initialised via ImageConverterSettings
     // Link formatter
-    linkFormatter: LinkFormatter;
+    linkFormatter!: LinkFormatter;
     // Context menu
-    contextMenu: ContextMenu;
+    contextMenu: ContextMenu | null = null;
     // Alignment
     // imageAlignment: ImageAlignment | null = null;
     ImageAlignmentManager: ImageAlignmentManager | null = null;
     // drag-resize
     imageResizer: ImageResizer | null = null;
     // batch processing
-    batchImageProcessor: BatchImageProcessor;
+    batchImageProcessor!: BatchImageProcessor;
     // Single Image Modal
-    processSingleImageModal: ProcessSingleImageModal;
+    processSingleImageModal?: ProcessSingleImageModal;
     // Process whole fodler
-    processFolderModal: ProcessFolderModal;
+    processFolderModal?: ProcessFolderModal;
     // Processcurrent note/canvas
-    processCurrentNote: ProcessCurrentNote;
+    processCurrentNote?: ProcessCurrentNote;
     // ProcessAllVault
-    processAllVaultModal: ProcessAllVaultModal
+    processAllVaultModal?: ProcessAllVaultModal;
     // captions
     captionManager?: ImageCaptionManager;
     
@@ -77,15 +77,74 @@ export default class ImageConverterPlugin extends Plugin {
     private temporaryBuffers: (ArrayBuffer | Blob | null)[] = [];
 
     // 插件自身通过 createBinary 创建的文件路径集合，用于 vault.on('create') 过滤，
-    // 避免 drop/paste/create 路径自己建的文件被 create 监听二次处理。
+    // 避免 create 兜底重复处理插件自己走 drop/paste 路径创建的文件。
     private selfCreatedPaths: Set<string> = new Set();
     // 正在处理中的文件路径集合，防止并发重复触发同一文件的 create 处理。
     private processingPaths: Set<string> = new Set();
 
     private updateBodyStateClasses() {
-        document.body.classList.toggle(
+        activeDocument.body.classList.toggle(
             'image-converter-disable-native-image-selection',
             this.settings.disableObsidianImageSelectionOnClick
+        );
+    }
+
+    private attachImageResizerToMarkdownView(markdownView: MarkdownView, refreshLayout = false) {
+        if (
+            (!this.settings.isImageResizeEnbaled && !this.settings.enableImageClickZoom) ||
+            !this.imageResizer
+        ) return;
+
+        if (refreshLayout) {
+            this.imageResizer.onLayoutChange(markdownView);
+            return;
+        }
+
+        this.imageResizer.onActiveViewChange(markdownView);
+    }
+
+    private attachImageResizerToActiveView(refreshLayout = false) {
+        if (
+            (!this.settings.isImageResizeEnbaled && !this.settings.enableImageClickZoom) ||
+            !this.imageResizer
+        ) return;
+
+        const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (activeView) {
+            this.attachImageResizerToMarkdownView(activeView, refreshLayout);
+            return;
+        }
+
+        this.imageResizer.detachView();
+    }
+
+    private registerImageResizerWorkspaceEvents() {
+        if (!this.settings.isImageResizeEnbaled && !this.settings.enableImageClickZoom) return;
+
+        this.registerEvent(
+            this.app.workspace.on('file-open', (file) => {
+                if (!file) {
+                    this.imageResizer?.detachView();
+                    return;
+                }
+
+                this.attachImageResizerToActiveView();
+            })
+        );
+
+        this.registerEvent(
+            this.app.workspace.on('active-leaf-change', (leaf: { view?: unknown } | null) => {
+                const markdownView = leaf?.view instanceof MarkdownView
+                    ? leaf.view
+                    : this.app.workspace.getActiveViewOfType(MarkdownView);
+
+                if (markdownView) {
+                    this.attachImageResizerToMarkdownView(markdownView);
+                    return;
+                }
+
+                this.imageResizer?.detachView();
+            })
         );
     }
 
@@ -131,27 +190,6 @@ export default class ImageConverterPlugin extends Plugin {
             );
         }
 
-        // // REDUNDANT - Below already initializes on layout change and for applying alignemnt "file-open" is much better option as it fires much less often
-        // // NOTE: For alignment to be set this must be outside `this.app.workspace.onLayoutReady(() => {`
-        // // Initialize DRAG/SCROLL rESIZING and apply alignments- when opening into the note or swithing notes 
-        // this.registerEvent(
-        //     this.app.workspace.on('active-leaf-change', (leaf) => {
-        //         console.count("active-leaf-change triggered")
-        //         // const markdownView = leaf?.view instanceof MarkdownView ? leaf.view : null;
-        //         // if (markdownView && this.imageResizer && this.settings.isImageResizeEnbaled) {
-        //         //     this.imageResizer.onload(markdownView);
-        //         // }
-        //         // // Delay the execution slightly to ensure the new window's DOM is ready
-        //         // setTimeout(() => {
-        //         //     this.ImageAlignmentManager!.setupImageObserver();
-        //         // }, 500);
-        //         const currentFile = this.app.workspace.getActiveFile();
-        //         if (currentFile) {
-        //             // console.log("current file path:", currentFile.path)
-        //             void this.ImageAlignmentManager!.applyAlignmentsToNote(currentFile.path);
-        //         }
-        //     })
-        // );
 
 
         // Wait for layout to be ready before initializing view-dependent components
@@ -161,6 +199,8 @@ export default class ImageConverterPlugin extends Plugin {
                 //eslint-disable-next-line
                 new Notice('Image Converter: Failed to initialize. Check console for details.');
             });
+
+            this.registerImageResizerWorkspaceEvents();
 
             // Apply Image Alignment and Resizing when switching Live to Reading mode etc.
             if (
@@ -182,10 +222,7 @@ export default class ImageConverterPlugin extends Plugin {
                         }
 
                         if (this.settings.isImageResizeEnbaled || this.settings.enableImageClickZoom) {
-                            const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-                            if (activeView) {
-                                this.imageResizer?.onLayoutChange(activeView);
-                            }
+                            this.attachImageResizerToActiveView(true);
                         }
 
                         if (this.settings.enableImageCaptions) {
@@ -221,10 +258,7 @@ export default class ImageConverterPlugin extends Plugin {
         if (this.settings.isImageResizeEnbaled || this.settings.enableImageClickZoom) {
             this.imageResizer = new ImageResizer(this);
             this.addChild(this.imageResizer);
-            const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-            if (activeView) {
-                this.imageResizer.attachView(activeView);
-            }
+            this.attachImageResizerToActiveView();
         }
 
         // Initialize components that depend on others
@@ -250,6 +284,7 @@ export default class ImageConverterPlugin extends Plugin {
                 this.folderAndFilenameManagement,
                 this.variableProcessor
             );
+            this.addChild(this.contextMenu);
         }
 
         // REDUNDANT as it is already initialized inside ImageConverterSettings %%Initialize NonDestructiveResizeSettings if needed%%
@@ -337,25 +372,18 @@ export default class ImageConverterPlugin extends Plugin {
             this.ImageAlignmentManager = null;
         }
 
-        // Clean up resizer reference (it will be unloaded automatically as a child)
         if (this.imageResizer) {
+            const { imageResizer } = this;
             this.imageResizer = null;
+            this.removeChild(imageResizer);
         }
 
-        // Clean up UI components
+        // Clean up UI components registered as child components so their registerDomEvent() disposers run now.
         if (this.contextMenu) {
-            this.contextMenu.onunload();
+            const { contextMenu } = this;
+            this.contextMenu = null;
+            this.removeChild(contextMenu);
         }
-
-        // Clean up modals
-        [
-            this.processSingleImageModal,
-            this.processFolderModal,
-            this.processCurrentNote,
-            this.processAllVaultModal
-        ].forEach(modal => {
-            if (modal?.close) modal.close();
-        });
 
         // Clean up any open modals
         [
@@ -367,8 +395,18 @@ export default class ImageConverterPlugin extends Plugin {
             if (modal?.close) modal.close();
         });
 
-        document.body.classList.remove('image-captions-enabled');
-        document.body.classList.remove('image-converter-disable-native-image-selection');
+        this.processSingleImageModal = undefined;
+        this.processFolderModal = undefined;
+        this.processCurrentNote = undefined;
+        this.processAllVaultModal = undefined;
+
+        if (this.captionManager) {
+            this.captionManager.cleanup();
+            this.captionManager = undefined;
+        }
+
+        activeDocument.body.classList.remove('image-captions-enabled');
+        activeDocument.body.classList.remove('image-converter-disable-native-image-selection');
     }
 
 
@@ -438,7 +476,7 @@ export default class ImageConverterPlugin extends Plugin {
                     }
 
                     // add some delay as disabling takes some time.
-                    await new Promise(resolve => setTimeout(resolve, 500)); // even 100ms would be enough.
+                    await new Promise(resolve => window.setTimeout(resolve, 500)); // even 100ms would be enough.
 
                     // 2. Re-enable the plugin
                     if (plugins?.enablePlugin) {
@@ -457,6 +495,18 @@ export default class ImageConverterPlugin extends Plugin {
                 }
             },
         });
+    }
+
+    private validateAttachmentPath(vaultPath: string): boolean {
+        const violation = this.folderAndFilenameManagement.getWindowsPathLengthViolation(vaultPath);
+        if (!violation) {
+            return true;
+        }
+        new Notice(
+            `Image not added: the destination path is too long for Windows (${violation.length} characters). Paths must be shorter than ${violation.limit} characters. Shorten the destination folder or filename.\n${violation.absolutePath}`,
+            15000
+        );
+        return false;
     }
 
     /**
@@ -510,7 +560,7 @@ export default class ImageConverterPlugin extends Plugin {
                 while (Date.now() < deadline) {
                     hasRef = this.noteReferencesFile(activeFile, file);
                     if (hasRef) break;
-                    await new Promise((resolve) => setTimeout(resolve, 150));
+                    await new Promise((resolve) => window.setTimeout(resolve, 150));
                 }
                 if (!hasRef) return;
 
@@ -620,7 +670,9 @@ export default class ImageConverterPlugin extends Plugin {
             '.git',
             '.remote.',
             '.sync/',
+            // eslint-disable-next-line obsidianmd/hardcoded-config-path -- sync tools install at well-known plugin paths regardless of the vault config dir
             '.obsidian/plugins/remotely-save/',
+            // eslint-disable-next-line obsidianmd/hardcoded-config-path -- sync tools install at well-known plugin paths regardless of the vault config dir
             '.obsidian/plugins/syncthing/',
             'sync-index',
             '.obsidian-git'
@@ -664,6 +716,8 @@ export default class ImageConverterPlugin extends Plugin {
         // Drop event (Obsidian editor - primary handlers)
         this.registerEvent(
             this.app.workspace.on("editor-drop", async (evt: DragEvent, editor: Editor) => {
+                if (evt.defaultPrevented) return;
+
                 if (!evt.dataTransfer) {
                     console.warn("DataTransfer object is null initially. Cannot process drop event.");
                     return;
@@ -700,6 +754,8 @@ export default class ImageConverterPlugin extends Plugin {
         // --- Paste event handler ---
         this.registerEvent(
             this.app.workspace.on("editor-paste", async (evt: ClipboardEvent, editor: Editor) => {
+                if (evt.defaultPrevented) return;
+
                 if (!evt.clipboardData) {
                     console.warn("ClipboardData object is null. Cannot process paste event.");
                     return;
@@ -733,7 +789,7 @@ export default class ImageConverterPlugin extends Plugin {
 
     /**
      * 根据 modalBehavior 设置选择转换/文件名/文件夹/链接格式/尺寸预设。
-     * drop、paste、create 三条路径共用。
+     * create 兜底路径使用（drop/paste 路径各自内联等价逻辑）。
      */
     private async getSelectedPresets(): Promise<{
         selectedConversionPreset: ConversionPreset;
@@ -841,14 +897,91 @@ export default class ImageConverterPlugin extends Plugin {
         // - This allows for sequential processing, avoiding concurrency issues.
         const filePromises = supportedFiles.map(async (file) => {
             try {
-                // Step 3.1: Select presets (shared with paste/create paths)
-                const {
-                    selectedConversionPreset,
-                    selectedFilenamePreset,
-                    selectedFolderPreset,
-                    selectedLinkFormatPreset,
-                    selectedResizePreset
-                } = await this.getSelectedPresets();
+                // Check modal behavior setting
+                const { modalBehavior } = this.settings;
+                let showModal = modalBehavior === "always";
+
+                if (modalBehavior === "ask") {
+                    showModal = await new Promise<boolean>((resolve) => {
+                        new ConfirmDialog(
+                            this.app,
+                            "Show Preset Selection Modal?",
+                            "Do you want to select presets for this image?",
+                            "Yes",
+                            () => resolve(true)
+                        ).open();
+                    });
+                }
+
+                let selectedConversionPreset: ConversionPreset;
+                let selectedFilenamePreset: FilenamePreset;
+                let selectedFolderPreset: FolderPreset;
+                let selectedLinkFormatPreset: LinkFormatPreset;
+                let selectedResizePreset: NonDestructiveResizePreset;
+
+                if (showModal) {
+                    // Show the modal and wait for user selection
+                    ({
+                        selectedConversionPreset,
+                        selectedFilenamePreset,
+                        selectedFolderPreset,
+                        selectedLinkFormatPreset,
+                        selectedResizePreset
+                    } = await new Promise<{
+                        selectedConversionPreset: ConversionPreset;
+                        selectedFilenamePreset: FilenamePreset;
+                        selectedFolderPreset: FolderPreset;
+                        selectedLinkFormatPreset: LinkFormatPreset;
+                        selectedResizePreset: NonDestructiveResizePreset;
+                    }>((resolve) => {
+                        new PresetSelectionModal(
+                            this.app,
+                            this.settings,
+                            (conversionPreset, filenamePreset, folderPreset, linkFormatPreset, resizePreset) => {
+                                resolve({
+                                    selectedConversionPreset: conversionPreset,
+                                    selectedFilenamePreset: filenamePreset,
+                                    selectedFolderPreset: folderPreset,
+                                    selectedLinkFormatPreset: linkFormatPreset,
+                                    selectedResizePreset: resizePreset,
+                                });
+                            },
+                            this,
+                            this.variableProcessor
+                        ).open();
+                    }));
+                } else {
+                    // Use default presets from settings using the generic getter
+                    selectedConversionPreset = this.getPresetByName(
+                        this.settings.selectedConversionPreset,
+                        this.settings.conversionPresets,
+                        'Conversion'
+                    );
+
+                    selectedFilenamePreset = this.getPresetByName(
+                        this.settings.selectedFilenamePreset,
+                        this.settings.filenamePresets,
+                        'Filename'
+                    );
+
+                    selectedFolderPreset = this.getPresetByName(
+                        this.settings.selectedFolderPreset,
+                        this.settings.folderPresets,
+                        'Folder'
+                    );
+
+                    selectedLinkFormatPreset = this.getPresetByName(
+                        this.settings.linkFormatSettings.selectedLinkFormatPreset,
+                        this.settings.linkFormatSettings.linkFormatPresets,
+                        'Link Format'
+                    );
+
+                    selectedResizePreset = this.getPresetByName(
+                        this.settings.nonDestructiveResizeSettings.selectedResizePreset,
+                        this.settings.nonDestructiveResizeSettings.resizePresets,
+                        'Resize'
+                    );
+                }
 
                 // Step 3.2: Determine Destination and Filename
                 // - Use the `determineDestination` function to calculate the destination path and new filename for the current file.
@@ -870,24 +1003,7 @@ export default class ImageConverterPlugin extends Plugin {
                     return; // Resolve this promise (no further processing for this file)
                 }
 
-                // Rest of the steps (3.3 to 3.7) remain the same,
-                // using selectedConversionPreset and selectedFilenamePreset
-                // ...
-                // Step 3.3: Create Destination Folder
-                // - Create the destination folder if it doesn't exist.
-                try {
-                    await this.folderAndFilenameManagement.ensureFolderExists(destinationPath);
-                } catch (error) {
-                    // Ignore "Folder already exists" error, but handle other errors.
-                    const errorMessage = error instanceof Error ? error.message : String(error);
-                    if (!errorMessage.startsWith('Folder already exists')) {
-                        console.error("Error creating folder:", errorMessage);
-                        new Notice(`Failed to create folder "${destinationPath}". Check console for details.`);
-                        return; // Resolve this promise
-                    }
-                }
-
-                // Step 3.4: Handle Filename Conflicts
+                // Step 3.3: Handle Filename Conflicts
                 // - Check if a file with the same name already exists at the destination.
                 // - Apply conflict resolution rules based on the selected filename preset (e.g., increment, reuse, or skip).
                 const fullPath = `${destinationPath}/${newFilename}`;
@@ -918,6 +1034,23 @@ export default class ImageConverterPlugin extends Plugin {
                 }
 
                 const newFullPath = this.folderAndFilenameManagement.combinePath(destinationPath, newFilename);
+
+                // Step 3.4: Reject unsafe paths before creating folders or writing the image.
+                if (!this.validateAttachmentPath(newFullPath)) {
+                    return;
+                }
+
+                try {
+                    await this.folderAndFilenameManagement.ensureFolderExists(destinationPath);
+                } catch (error) {
+                    // Ignore "Folder already exists" error, but handle other errors.
+                    const errorMessage = error instanceof Error ? error.message : String(error);
+                    if (!errorMessage.startsWith('Folder already exists')) {
+                        console.error("Error creating folder:", errorMessage);
+                        new Notice(`Failed to create folder "${destinationPath}". Check console for details.`);
+                        return; // Resolve this promise
+                    }
+                }
 
                 // Step 3.5: Process, Reuse, or Skip
                 if (!skipFurtherProcessing) {
@@ -1110,15 +1243,91 @@ export default class ImageConverterPlugin extends Plugin {
         // Step 3: Map Files to Processing Promises
         // - Create an array of promises, each responsible for processing one pasted file.
         const filePromises = supportedFiles.map(async (file) => {
-            // Step 3.1: Select presets (shared with drop/create paths)
-            const {
-                selectedConversionPreset,
-                selectedFilenamePreset,
-                selectedFolderPreset,
-                selectedLinkFormatPreset,
-                selectedResizePreset
-            } = await this.getSelectedPresets();
+            // Check modal behavior setting
+            const { modalBehavior } = this.settings;
+            let showModal = modalBehavior === "always";
 
+            if (modalBehavior === "ask") {
+                showModal = await new Promise<boolean>((resolve) => {
+                    new ConfirmDialog(
+                        this.app,
+                        "Show Preset Selection Modal?",
+                        "Do you want to select presets for this image?",
+                        "Yes",
+                        () => resolve(true)
+                    ).open();
+                });
+            }
+
+            let selectedConversionPreset: ConversionPreset;
+            let selectedFilenamePreset: FilenamePreset;
+            let selectedFolderPreset: FolderPreset;
+            let selectedLinkFormatPreset: LinkFormatPreset;
+            let selectedResizePreset: NonDestructiveResizePreset;
+
+            if (showModal) {
+                // Show the modal and wait for user selection
+                ({
+                    selectedConversionPreset,
+                    selectedFilenamePreset,
+                    selectedFolderPreset,
+                    selectedLinkFormatPreset,
+                    selectedResizePreset
+                } = await new Promise<{
+                    selectedConversionPreset: ConversionPreset;
+                    selectedFilenamePreset: FilenamePreset;
+                    selectedFolderPreset: FolderPreset;
+                    selectedLinkFormatPreset: LinkFormatPreset;
+                    selectedResizePreset: NonDestructiveResizePreset;
+                }>((resolve) => {
+                    new PresetSelectionModal(
+                        this.app,
+                        this.settings,
+                        (conversionPreset, filenamePreset, folderPreset, linkFormatPreset, resizePreset) => {
+                            resolve({
+                                selectedConversionPreset: conversionPreset,
+                                selectedFilenamePreset: filenamePreset,
+                                selectedFolderPreset: folderPreset,
+                                selectedLinkFormatPreset: linkFormatPreset,
+                                selectedResizePreset: resizePreset,
+                            });
+                        },
+                        this,
+                        this.variableProcessor
+                    ).open();
+                }));
+            } else {
+                // Use default presets from settings using the generic getter
+                selectedConversionPreset = this.getPresetByName(
+                    this.settings.selectedConversionPreset,
+                    this.settings.conversionPresets,
+                    'Conversion'
+                );
+
+                selectedFilenamePreset = this.getPresetByName(
+                    this.settings.selectedFilenamePreset,
+                    this.settings.filenamePresets,
+                    'Filename'
+                );
+
+                selectedFolderPreset = this.getPresetByName(
+                    this.settings.selectedFolderPreset,
+                    this.settings.folderPresets,
+                    'Folder'
+                );
+
+                selectedLinkFormatPreset = this.getPresetByName(
+                    this.settings.linkFormatSettings.selectedLinkFormatPreset,
+                    this.settings.linkFormatSettings.linkFormatPresets,
+                    'Link Format'
+                );
+
+                selectedResizePreset = this.getPresetByName(
+                    this.settings.nonDestructiveResizeSettings.selectedResizePreset,
+                    this.settings.nonDestructiveResizeSettings.resizePresets,
+                    'Resize'
+                );
+            }
             // Step 3.2: Determine Destination and Filename
             // - Calculate the destination path and new filename for the current file.
             try {
@@ -1140,20 +1349,7 @@ export default class ImageConverterPlugin extends Plugin {
                     return; // Resolve this promise
                 }
 
-                // Step 3.3: Create Destination Folder
-                // - Create the destination folder if it doesn't exist.
-                try {
-                    await this.folderAndFilenameManagement.ensureFolderExists(destinationPath);
-                } catch (error) {
-                    const errorMessage = error instanceof Error ? error.message : String(error);
-                    if (!errorMessage.startsWith('Folder already exists')) {
-                        console.error("Error creating folder:", errorMessage);
-                        new Notice(`Failed to create folder "${destinationPath}". Check console for details.`);
-                        return; // Resolve this promise
-                    }
-                }
-
-                // Step 3.4: Handle Filename Conflicts
+                // Step 3.3: Handle Filename Conflicts
                 // - Check for filename conflicts and apply conflict resolution rules.
                 const fullPath = `${destinationPath}/${newFilename}`;
                 let existingFile = this.app.vault.getAbstractFileByPath(fullPath);
@@ -1192,6 +1388,22 @@ export default class ImageConverterPlugin extends Plugin {
                 }
 
                 const newFullPath = this.folderAndFilenameManagement.combinePath(destinationPath, newFilename);
+
+                // Step 3.4: Reject unsafe paths before creating folders or writing the image.
+                if (!this.validateAttachmentPath(newFullPath)) {
+                    return;
+                }
+
+                try {
+                    await this.folderAndFilenameManagement.ensureFolderExists(destinationPath);
+                } catch (error) {
+                    const errorMessage = error instanceof Error ? error.message : String(error);
+                    if (!errorMessage.startsWith('Folder already exists')) {
+                        console.error("Error creating folder:", errorMessage);
+                        new Notice(`Failed to create folder "${destinationPath}". Check console for details.`);
+                        return; // Resolve this promise
+                    }
+                }
 
                 // Step 3.5: Process, Reuse, or Skip
                 if (!skipFurtherProcessing) {
