@@ -51,11 +51,12 @@ vault.create ─┘     （create 路径的"链接处理"= 回写，drop/paste =
 | 组件 | 职责 |
 |---|---|
 | `registerVaultCreateHandler()` | onload 时注册常驻 `vault.on('create')`（桌面+移动都注册，区别于 drop/paste 仅桌面） |
-| `handleFileCreated(file: TFile)` | create 主入口：四重过滤 → 延迟等 metadataCache → 链接证据判断 → 调度共享管道 → 删旧 → 回写链接 |
+| `handleFileCreated(file: TFile)` | create 主入口：四重过滤 → 轮询等 metadataCache 链接证据 → 调度共享管道 → renameFile/modifyBinary 写回 |
 | `selfCreatedPaths: Set<string>` | 防二次处理：插件自己 `createBinary` 建的文件也会触发 create 事件，建前记录路径、handler 里跳过 |
 | `isSyncPath(path)` | 同步路径黑名单（提取旧版 `isExternalOperation` 的 syncPatterns：`.git` / `syncthing` / `remotely-save` / `sync-conflict` 等） |
-| `processImportedFile(...)` | 从 handleDrop/handlePaste 抽出的共享管道（两者存在大量重复逻辑） |
-| `updateLinksInActiveNote(oldPath, newPath)` | 链接回写：把活动笔记里指向旧路径的引用替换为新路径 |
+| `getSelectedPresets()` | 从 handleDrop/handlePaste 抽出的共享预设选择逻辑（modalBehavior 弹窗/默认预设），三路复用 |
+| `noteReferencesFile(note, file)` | 链接证据：getFirstLinkpathDest 精确解析，解析为空时降级为链接文本匹配文件名 |
+| `processingPaths: Set<string>` | 防并发：同一文件处理中则跳过 |
 
 ## create 路径数据流
 
@@ -64,29 +65,33 @@ vault.on('create', file)
  ├─ 过滤1：TFile + 支持格式 + 非 neverProcess 模式
  ├─ 过滤2：非同步路径（isSyncPath）
  ├─ 过滤3：非插件自建（selfCreatedPaths）
- ├─ 延迟 ~300ms 等 metadataCache 更新
- ├─ 过滤4（链接证据）：活动笔记 metadataCache 是否出现指向该文件的引用？
+ ├─ 过滤4（链接证据）：轮询等待活动笔记 metadataCache 出现指向该文件的引用
+ │    （create 事件先于 Obsidian 插入链接触发，metadataCache 更新有延迟，
+ │     每 150ms 检查一次，最长 3 秒；匹配先 getFirstLinkpathDest 精确解析，
+ │     解析为空时降级为链接文本匹配文件名 basename/name）
  │    ├─ 否 → 忽略（外部同步/其他方式创建，不动）
  │    └─ 是 → 共享管道处理：
  │         ├─ 预设选择（与拖拽一致：modalBehavior 弹窗/默认预设）
  │         ├─ determineDestination（新文件名/目录，按预设规则）
- │         ├─ processImage 压缩 → createBinary 新文件
- │         ├─ 删除旧文件（原 TFile）
- │         └─ updateLinksInActiveNote(旧路径 → 新路径)
+ │         ├─ processImage 压缩
+ │         ├─ 路径未变 → modifyBinary 写回压缩内容
+ │         │  路径变化 → fileManager.renameFile（Obsidian 原生自动更新所有笔记
+ │         │              中的引用链接）+ modifyBinary 写回压缩内容
+ │         └─ showSizeComparisonNotification
  └─ 全程 try/catch，失败留原文件、Notice 报错
 ```
 
 ## 与 drop/paste 的差异点（需适配）
 
-1. **入参不同**：`FolderAndFilenameManagement.determineDestination` 签名是 `(file: File, activeFile, ...)`，create 路径拿到的是 TFile。共享管道需接受适配对象（含 `name`、`size`）或从 TFile 构造轻量 File 壳。
-2. **链接处理不同**：drop/paste 是自己 `insertLinkAtCursorPosition`；create 是 Obsidian 已写入链接 → 必须回写，否则断链。
-3. **时序**：create 触发时 Obsidian 可能尚未插入链接 → 需延迟等待 + metadataCache 证据确认。
+1. **入参不同**：`FolderAndFilenameManagement.determineDestination` 签名是 `(file: File, activeFile, ...)`，create 路径拿到的是 TFile。处理时从 TFile 读二进制构造 File 壳（含 name/type）再传入。
+2. **链接处理不同**：drop/paste 是自己 `insertLinkAtCursorPosition`；create 是 Obsidian 已写入链接 → 用 `fileManager.renameFile` 让 Obsidian 原生同步所有笔记中的引用（比手写链接回写更可靠），随后 `modifyBinary` 覆盖压缩内容。
+3. **时序**：create 触发时 Obsidian 尚未插入链接 → 轮询等待 metadataCache 链接证据（最长 3 秒），而非固定延迟。
 
 ## 错误处理
 
 - 所有步骤 try/catch，失败给 `Notice` + `console.error`，**不删除原文件**，不阻断 Obsidian 自身流程。
-- 处理中的文件加标记（如 `processingPaths` Set），防止并发重复触发。
-- 复用现有 `FolderAndFilenameManagement.safeRenameFile` 做安全重命名。
+- 处理中的文件加标记（`processingPaths` Set），防止并发重复触发。
+- 复用现有 `FolderAndFilenameManagement` 的 determineDestination/ensureFolderExists/handleNameConflicts。
 
 ## 测试
 
@@ -95,7 +100,7 @@ vault.on('create', file)
 - create 触发且链接证据成立 → 走处理管道，文件被重命名/压缩
 - 过滤：非图片 / neverProcess 模式 / 同步路径 / 插件自建文件 → 不处理
 - 链接证据不成立（活动笔记无引用）→ 不处理
-- 处理完成后活动笔记链接已回写为新路径
+- 处理完成后文件被 renameFile 到新路径且 modifyBinary 写回压缩内容
 - 桌面 + 移动端都注册 create 监听
 - 处理失败时原文件保留
 
@@ -112,6 +117,7 @@ npm run build
 ## 风险与注意
 
 1. **误处理外部同步**：create 事件同样捕获 git/Syncthing/Obsidian Sync 拉入的文件。过滤顺序务必：同步路径黑名单 + 链接证据双重把关，链接证据是"确实是用户插入"的强信号。
-2. **防二次处理**：插件自身 `createBinary`（drop/paste 路径与 create 路径都会建文件）触发 create 事件，`selfCreatedPaths` 必须覆盖两条自建路径。
-3. **时序竞态**：延迟等待用固定 ~300ms 即可，不要过度设计；若 metadataCache 尚未包含链接，本次忽略（宁可漏处理不可误处理）。
+2. **防二次处理**：插件自身 `createBinary`（drop/paste 路径）触发 create 事件，`selfCreatedPaths` 必须在 createBinary 前记录路径。
+3. **时序竞态**：实测确认 create 事件先于链接插入，必须轮询等待链接证据（最长 3 秒）；若 3 秒内未出现则忽略（宁可漏处理不可误处理）。
 4. **共享管道抽取为重构**：需保证 handleDrop/handlePaste 行为不变，抽取后先跑现有 `tests/integration/main/` 与 `npm test` 确认无回归。
+5. **链接证据降级匹配**：metadataCache 尚未完成路径解析时，直接匹配链接文本中的文件名 basename/name；实测该降级路径有效（中文文件名也能命中）。

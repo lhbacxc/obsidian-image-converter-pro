@@ -497,15 +497,22 @@ export default class ImageConverterPlugin extends Plugin {
             if (this.processingPaths.has(file.path)) return;
             this.processingPaths.add(file.path);
             try {
-                // 延迟等待 Obsidian 完成链接插入与 metadataCache 更新
-                await new Promise((resolve) => setTimeout(resolve, 300));
-
                 // 过滤4（链接证据）：当前活动笔记是否引用该文件？
                 // 只有"用户主动插入"才会在笔记中出现指向新文件的链接，
                 // 外部同步等场景不会有此链接，直接忽略。
+                // 注意：create 事件先于 Obsidian 插入链接触发，metadataCache 更新有延迟，
+                // 因此需要轮询等待（最长 3 秒），而不是固定延迟。
                 const activeFile = this.app.workspace.getActiveFile();
                 if (!activeFile || activeFile.extension !== "md") return;
-                if (!this.noteReferencesFile(activeFile, file)) return;
+
+                let hasRef = false;
+                const deadline = Date.now() + 3000;
+                while (Date.now() < deadline) {
+                    hasRef = this.noteReferencesFile(activeFile, file);
+                    if (hasRef) break;
+                    await new Promise((resolve) => setTimeout(resolve, 150));
+                }
+                if (!hasRef) return;
 
                 // 交互：与拖拽行为一致（modalBehavior 弹窗/默认预设）
                 const {
@@ -623,6 +630,8 @@ export default class ImageConverterPlugin extends Plugin {
 
     /**
      * 检查活动笔记的 metadataCache 中是否出现指向该文件的链接（链接证据过滤）。
+     * 先尝试 getFirstLinkpathDest 精确解析（wikilink/markdown 均支持），
+     * 若解析为空（metadataCache 尚未完成路径解析）则降级为链接文本匹配文件名。
      */
     private noteReferencesFile(note: TFile, file: TFile): boolean {
         const cache = this.app.metadataCache.getFileCache(note);
@@ -631,9 +640,20 @@ export default class ImageConverterPlugin extends Plugin {
             ...(cache.links ?? []),
             ...(cache.embeds ?? [])
         ];
-        return candidates.some((link) => {
+        // 精确解析：getFirstLinkpathDest 能解析出目标文件路径
+        const exactMatch = candidates.some((link) => {
             const dest = this.app.metadataCache.getFirstLinkpathDest(link.link, note.path);
             return dest?.path === file.path;
+        });
+        if (exactMatch) return true;
+        // 降级匹配：链接文本中包含该文件名（basename 或完整名）
+        // 用于 metadataCache 尚未完成解析时兜底
+        return candidates.some((link) => {
+            const linkText = link.link ?? "";
+            return (
+                (file.basename.length > 0 && linkText.includes(file.basename)) ||
+                linkText.includes(file.name)
+            );
         });
     }
 
